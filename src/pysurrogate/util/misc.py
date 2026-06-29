@@ -43,3 +43,26 @@ def is_duplicate(X, eps=1e-16):
     mask = np.full(len(X), False)
     mask[np.any(D < eps, axis=1)] = True
     return mask
+
+
+def discretize(X, n_partitions, xl=None, xu=None):
+    """Bin each coordinate of ``X`` into one of ``n_partitions`` equal-width bins per dimension.
+
+    Used by the random-forest backend to collapse a continuous design space onto a grid.
+
+    Args:
+        X: Points to discretize, shape ``(n, d)``.
+        n_partitions: Number of bins per dimension.
+        xl: Per-dimension lower bound, or ``None`` to take the column minima of ``X``.
+        xu: Per-dimension upper bound, or ``None`` to take the column maxima of ``X``.
+
+    Returns:
+        Integer bin indices in ``[0, n_partitions)``, same shape as ``X``.
+    """
+    if xl is None:
+        xl = X.min(axis=0)
+    if xu is None:
+        xu = X.max(axis=0)
+
+    thresholds = np.linspace(xl, xu, n_partitions + 1)[1:]
+    return (X[..., None] < thresholds.T).argmax(axis=-1)
