@@ -2,6 +2,12 @@
 
 from pysurrogate.core import metrics
 from pysurrogate.core.model import Model
+from pysurrogate.core.partitioning import (
+    CrossvalidationPartitioning,
+    Partitioning,
+    RandomPartitioning,
+    Split,
+)
 from pysurrogate.core.prediction import Prediction
 from pysurrogate.core.transformation import (
     NoNormalization,
@@ -20,4 +26,8 @@ __all__ = [
     "ZeroToOneNormalization",
     "Plog",
     "metrics",
+    "Partitioning",
+    "CrossvalidationPartitioning",
+    "RandomPartitioning",
+    "Split",
 ]
