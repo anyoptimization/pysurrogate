@@ -1,0 +1,45 @@
+"""Miscellaneous array helpers shared across the surrogate lifecycle."""
+
+import numpy as np
+from scipy.spatial.distance import cdist  # type: ignore[import-untyped]
+
+
+def at_least2d(x, expand="c"):
+    """Promote a 1-D array to 2-D, leaving 2-D (or higher) input untouched.
+
+    Args:
+        x: The array to promote.
+        expand: ``"c"`` to add a trailing column axis (``(n,) -> (n, 1)``), ``"r"`` to add a
+            leading row axis (``(n,) -> (1, n)``).
+
+    Returns:
+        ``x`` with the requested axis added when it was 1-D, otherwise ``x`` unchanged.
+    """
+    if x.ndim == 1:
+        if expand == "c":
+            return x[:, None]
+        elif expand == "r":
+            return x[None, :]
+    return x
+
+
+def is_duplicate(X, eps=1e-16):
+    """Boolean mask marking each row of ``X`` that duplicates an earlier row.
+
+    The first occurrence of a point is kept (marked ``False``); every later row within
+    ``eps`` of an earlier one is marked ``True``. Used to drop repeated design points before
+    a Kriging fit, where they make the correlation matrix singular.
+
+    Args:
+        X: Points, shape ``(n, d)``.
+        eps: Euclidean distance below which two rows count as the same point.
+
+    Returns:
+        A length-``n`` boolean array, ``True`` for rows that repeat an earlier row.
+    """
+    D = cdist(X, X)
+    D[np.triu_indices(len(X))] = np.inf
+
+    mask = np.full(len(X), False)
+    mask[np.any(D < eps, axis=1)] = True
+    return mask

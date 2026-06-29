@@ -1,0 +1,126 @@
+"""Invertible input/output transformations used by the model lifecycle (normalization, plog)."""
+
+from abc import abstractmethod
+
+import numpy as np
+
+
+class Transformation:
+    """Invertible map applied to inputs or outputs before/after fitting.
+
+    A transform normalizes data on the way into a backend (``forward``) and un-normalizes
+    predictions on the way out (``backward``). Affine transforms also expose ``scale`` -- the
+    constant Jacobian diagonal -- so a prediction's ``var``/``grad`` can be carried back to
+    original units through the chain rule without the query point.
+    """
+
+    @abstractmethod
+    def forward(self, X):
+        """Map data into the transformed space."""
+
+    @abstractmethod
+    def backward(self, X):
+        """Map data back to the original space (inverse of ``forward``)."""
+
+    def scale(self):
+        """Per-dimension affine scale of ``backward`` (the constant Jacobian diagonal).
+
+        Used to un-normalize a prediction's ``var``/``grad``/``var_grad`` through the chain
+        rule: for an affine ``backward(z) = s * z + offset`` the factor ``s`` is constant, so
+        it carries normalized outputs back to original units without the query point.
+
+        Returns:
+            The multiplicative factor ``s``, broadcastable against the per-dimension axis.
+
+        Raises:
+            NotImplementedError: If the transform is not affine and thus has no constant scale
+                (un-normalizing variance/gradients through it would need a per-point Jacobian,
+                which is not supported).
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} is not affine and exposes no constant scale; predictive "
+            "var/grad cannot be un-normalized through it."
+        )
+
+
+class NoNormalization(Transformation):
+    """Identity transform: leaves data untouched (the default for a ``Model``)."""
+
+    def forward(self, X):
+        return X
+
+    def backward(self, X):
+        return X
+
+    def scale(self):
+        return 1.0
+
+
+class Standardization(Transformation):
+    """Zero-mean / unit-variance standardization, fit from the data on first ``forward``."""
+
+    def __init__(self, mean=None, std=None) -> None:
+        self.mean = mean
+        self.std = std
+
+    def forward(self, X):
+        if self.mean is None:
+            self.mean = np.mean(X, axis=0)
+        if self.std is None:
+            self.std = np.std(X, axis=0)
+        return (X - self.mean) / self.std
+
+    def backward(self, X):
+        return (X * self.std) + self.mean
+
+    def scale(self):
+        return self.std
+
+
+class ZeroToOneNormalization(Transformation):
+    """Min-max normalization to ``[0, 1]``, with bounds estimated from the data by default."""
+
+    def __init__(self, xl=None, xu=None, estimate_bounds=True) -> None:
+        self.xl = xl
+        self.xu = xu
+        self.estimate_bounds = estimate_bounds
+
+    def forward(self, X):
+        if self.estimate_bounds:
+            if self.xl is None:
+                self.xl = np.min(X, axis=0)
+            if self.xu is None:
+                self.xu = np.max(X, axis=0)
+
+        denom = self.xu - self.xl
+        # avoid divide-by-zero on a constant dimension
+        denom = denom + (denom == 0) * 1e-32
+        return (X - self.xl) / denom
+
+    def backward(self, X):
+        return X * (self.xu - self.xl) + self.xl
+
+    def scale(self):
+        return self.xu - self.xl
+
+
+class Plog(Transformation):
+    """Signed-log transform ``sign(y) * log(1 + |y|)`` for heavy-tailed outputs.
+
+    Non-affine, so it has no constant ``scale``: requesting predictive variance/gradient on
+    a ``Plog``-transformed output raises (inherited ``Transformation.scale``).
+    """
+
+    def forward(self, y):
+        yp = np.zeros_like(y)
+        larger = y >= 0
+        yp[larger] = np.log(1 + y[larger])
+        yp[~larger] = -np.log(1 - y[~larger])
+        return yp
+
+    def backward(self, yp):
+        y = np.zeros_like(yp)
+        larger = yp >= 0
+        y[larger] = np.exp(yp[larger]) - 1
+        y[~larger] = 1 - np.exp(-yp[~larger])
+        return y

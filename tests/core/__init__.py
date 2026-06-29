@@ -1,0 +1,1 @@
+"""Core lifecycle test suite."""
