@@ -5,7 +5,7 @@ import numpy as np
 from pysurrogate.core.model import Model
 from pysurrogate.core.prediction import Prediction
 from pysurrogate.models import RBF
-from pysurrogate.selection import Benchmark, ModelSelection
+from pysurrogate.selection import AutoModel, Benchmark
 
 
 class _RecordingModel(Model):
@@ -35,7 +35,7 @@ def _data(n=40):
 def test_model_selection_forwards_optimize_false():
     X, y = _data()
     _RecordingModel.fit_log = []
-    sel = ModelSelection({"rec": _RecordingModel()}, sorted_by="rmse")
+    sel = AutoModel({"rec": _RecordingModel()}, sorted_by="rmse")
     sel.fit(X, y, optimize=False)
 
     # every fit the benchmark folds + winner refit performed must have seen optimize=False

@@ -224,19 +224,19 @@ class Benchmark:
 
 
 # ---------------------------------------------------------------------------------------------
-# ModelSelection -- pick the best candidate by a cross-validated Benchmark, refit on all data
+# AutoModel -- pick the best candidate by a cross-validated Benchmark, refit on all data
 # ---------------------------------------------------------------------------------------------
 
 
-class ModelSelection(Model):
-    """Pick the best surrogate from a set of candidates by cross-validated benchmark.
+class AutoModel(Model):
+    """A surrogate that auto-selects its implementation from a set of candidates.
 
     Wraps a :class:`Benchmark`: ``fit`` runs the benchmark on the data, ranks the candidates by
     ``sorted_by``, and (by default) refits the winning prototype on the full data set. ``predict``
-    then delegates to that chosen model. It is itself a ``Model``, so a selection can be dropped in
-    anywhere a single surrogate is expected.
+    then delegates to that chosen model. It is itself a ``Model``, so an ``AutoModel`` can be dropped
+    in anywhere a single surrogate is expected.
 
-    ``ModelSelection()`` with no arguments works out of the box: it selects over the recommended
+    ``AutoModel()`` with no arguments works out of the box: it selects over the recommended
     fleet (:func:`~pysurrogate.selection.study.default_models` -- the mean/KNN/IDW/SVR/RBF baselines
     plus the Kriging kernel zoo). If the chosen model must report uncertainty (e.g. to drive an
     acquisition function), pass the uncertainty-only fleet

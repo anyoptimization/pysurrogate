@@ -105,7 +105,7 @@ def test_generic_model_refit_appends_and_refits():
 
 def test_cheap_ranking_then_tune_winner_manually():
     # the two-stage is just the optimize flag: rank a fleet cheaply via Benchmark(optimize=False),
-    # then fully tune the chosen winner yourself -- no special ModelSelection mode needed.
+    # then fully tune the chosen winner yourself -- no special AutoModel mode needed.
     X, y, _ = _data(fn="rosenbrock")
     fleet = cartesian(Kriging, corr={"gauss": Gaussian(), "m25": Matern(2.5)})
 

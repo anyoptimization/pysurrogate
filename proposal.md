@@ -54,7 +54,15 @@ Then:
 **Risk:** low. Pure relocation + call-site swaps; golden stays green (same numbers). This is the safe
 first step.
 
-### B. `core/kernel.py` — one kernel object, `ard` toggles RBF vs DACE
+> **Context (decided):** `RBF` is a *temporary* implementation — the `Dace` engine is always the
+> better surrogate. So the kernel unification is **not** about preserving RBF; it is about giving the
+> kernel zoo a single clean home in `core/`, with the option to either **retire `RBF`** or re-express
+> it as a thin "DACE kernels + polynomial tail, no theta-search" configuration. Because we are not
+> preserving RBF's separate scalar-distance path, the two "real details" below mostly evaporate (see
+> the note after the sketch). The `ard` design still matters: it is how *one* kernel object serves
+> both the isotropic and the per-dimension use without duplication.
+
+### B. `core/kernel.py` — one kernel object, `ard` toggles isotropic vs per-dimension
 
 The key insight (yours): **ARD is just "one length-scale per dimension" vs "one shared."** So a single
 kernel object covers both — `ard=False` is the isotropic/RBF use, `ard=True` is the per-dimension/DACE
@@ -80,26 +88,28 @@ class Multiquadric(Kernel): ...      # radial basis; conditionally-PD
 `Dace` uses the GP-covariance kernels (typically `ard=True`); `RBF` can use **any** of them
 (typically `ard=False`) plus its polynomial tail. The kernel zoo is defined **once**.
 
-**Two real details to handle (not blockers, just the actual work):**
-1. **ARD needs per-dimension information.** RBF today feeds the kernel a single *squared scalar*
-   distance `r`; ARD needs the per-dimension differences (to scale each axis by its own theta). So
-   the unified kernel must receive coordinate differences `D` (what DACE already passes), and RBF's
-   scalar-`r` path moves to that representation. `ard=False` then just means "all thetas equal."
+**The two former "details", now that RBF is not being preserved:**
+1. **ARD needs per-dimension information.** A kernel feeds on coordinate differences `D` (what DACE
+   already passes), so `ard=True` scales each axis by its own theta and `ard=False` shares one theta.
+   Since RBF's separate scalar-`r` path is going away (RBF retired or rebuilt on the DACE
+   representation), there is no second representation to reconcile — the kernel just takes `D`.
 2. **Not every kernel is a valid GP covariance.** `tps`/`mq` are only conditionally positive-definite,
-   so used as a raw Kriging correlation they can give a non-PD `R`. That's already handled by the
-   *never-raise / infeasible* contract (`DaceFitError` → the optimizer steps around it), and RBF makes
-   them well-posed via the polynomial tail. So the kernel object is shared; **whether a given model
+   so as a raw Kriging correlation they can give a non-PD `R`. Already handled by the *never-raise /
+   infeasible* contract (`DaceFitError` → the optimizer steps around it). If a tail-based RBF-style
+   model is kept, the polynomial tail makes them well-posed. Either way, **whether a given model
    accepts a given kernel stays the model's concern** — we don't pretend `tps` is a covariance.
 
 **Risk:** medium — touches the golden-critical DACE kernel path, so each kernel migrates with golden
 as the anchor (the existing 19 snapshots prove the DACE kernels are byte-identical after the move).
+Writing `tps`/`mq` in the `k(D, theta)` style (per your note) lets them live in the same zoo with
+`ard=False` as their natural setting.
 
 ### Why this is worth it
 - One kernel zoo and one basis instead of 2× and 3× copies — bug-fixes and new kernels land once.
-- `RBF` and `Dace` become two *configurations* of the same machinery (kernel + optional tail +
-  optional theta-search), which is what they mathematically are.
-- It makes the `core` layer the real home of the modeling primitives, with `dace`/`models` as
+- The `core` layer becomes the real home of the modeling primitives, with `dace`/`models` as
   assemblies on top — matching the layering the rest of the framework already follows.
+- It clarifies the path for `RBF`: either delete it, or make it a thin "shared kernel + polynomial
+  tail, no theta-search" `Model` — no longer a parallel kernel implementation.
 
 ---
 
@@ -163,32 +173,33 @@ proposal, not auto-applied.
 
 ---
 
-## 3. [M] `ModelSelection(Model)` inherits the lifecycle but bypasses all of it
+## 3. [M] `AutoModel` (was `ModelSelection`) — renamed ✓; still bypasses the lifecycle
+
+> **Done:** renamed `ModelSelection` → **`AutoModel`** (clean rename, no alias — nothing is
+> published yet). The remaining work below is making the inheritance *honest*.
+
 
 **Where:** `selection/benchmark.py`.
 
-**Problem.** `ModelSelection` subclasses `Model` yet overrides `fit`/`predict`/`refit`/`records`
+**Problem.** `AutoModel` subclasses `Model` yet overrides `fit`/`predict`/`refit`/`records`
 and never implements `_fit`/`_predict`. None of the machinery `Model` advertises runs —
 normalization, nan/inf filtering, duplicate elimination, active-dims, exception capture,
 postprocess un-normalization. It borrows only `Model.__init__`'s `_validation`/`_epoch` fields. The
-"is-a `Model`" claim is misleading: it is really a *composition* facade that delegates to a chosen
-sub-model.
+"is-a `Model`" claim is currently faked: it is really a *composition* facade that delegates to a
+chosen sub-model.
 
-**The drop-in `fit`/`predict` is a feature, not the problem.** Being able to hand a selector to
+**The drop-in `fit`/`predict` is a feature, not the problem.** Being able to hand an `AutoModel` to
 anything that expects a model — `fit`, then `predict` — is genuinely convenient UX and worth
-keeping. So the real issue is **honesty + naming**, not the model-like interface.
+keeping. So the real issue is **honesty**, not the model-like interface. (The name is now `AutoModel`,
+which says "a surrogate that auto-selects" — done.)
 
-**Proposal — make it a genuine `Model`, and rename it:**
-- **Genuine `Model`:** implement `_fit` = run the benchmark + store the winning prototype, `_predict`
-  = delegate to the winner. The lifecycle then *actually* owns pre/postprocess, so the `is-a Model`
-  claim becomes true and the convenient `fit`/`predict` surface is real, not faked.
-- **Rename** from `ModelSelection` (which names a *process*) to something that names *a model that
-  picks its own implementation*: e.g. **`AutoModel`** / **`AutoSurrogate`** / `BestModel`. The user
-  thinks of it as "a surrogate that auto-selects," and the name should say that. Keep
-  `ModelSelection` as a thin deprecated alias for one release if anything imports it.
+**Remaining proposal — make it a *genuine* `Model`:** implement `_fit` = run the benchmark + store
+the winning prototype, `_predict` = delegate to the winner. The lifecycle then *actually* owns
+pre/postprocess, so the `is-a Model` claim becomes true and the convenient `fit`/`predict` surface is
+real, not faked.
 
-(The earlier "honest facade that doesn't inherit `Model`" option is now *rejected* — it would throw
-away the convenient drop-in interface, which is the thing worth preserving.)
+(The earlier "honest facade that doesn't inherit `Model`" option is *rejected* — it would throw away
+the convenient drop-in interface, which is the thing worth preserving.)
 
 ---
 
@@ -299,6 +310,11 @@ the exponent). At minimum, correct the KNN docstring to say it weights by square
 ---
 
 ## 10. [L] RBF kernel library has three sharp edges
+
+> Note: `RBF` is a temporary implementation slated for retirement or a rebuild on the shared
+> `core/kernel.py` (★B). If it is removed, these are moot; if it is rebuilt, they are fixed for free
+> while defining the unified kernel zoo. Listed here for completeness.
+
 
 **Where:** `models/rbf.py`.
 

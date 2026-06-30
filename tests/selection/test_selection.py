@@ -3,7 +3,7 @@
 import numpy as np
 
 from pysurrogate.models import RBF, SVR, SimpleMean
-from pysurrogate.selection import Benchmark, ModelSelection, cartesian
+from pysurrogate.selection import AutoModel, Benchmark, cartesian
 
 
 def _data(n=60, seed=0):
@@ -47,7 +47,7 @@ def test_benchmark_records_per_fold_runs():
 
 def test_model_selection_picks_and_refits_best():
     X, y = _data()
-    sel = ModelSelection({"mean": SimpleMean(), "rbf": RBF(kernel="gaussian"), "svr": SVR()}, sorted_by="rmse")
+    sel = AutoModel({"mean": SimpleMean(), "rbf": RBF(kernel="gaussian"), "svr": SVR()}, sorted_by="rmse")
     sel.fit(X, y)
 
     assert sel.best["label"] == "rbf"
@@ -58,9 +58,9 @@ def test_model_selection_picks_and_refits_best():
 
 
 def test_model_selection_defaults_to_recommended_fleet():
-    # ModelSelection() with no args selects over the recommended default fleet
+    # AutoModel() with no args selects over the recommended default fleet
     X, y = _data()
-    sel = ModelSelection(sorted_by="rmse")
+    sel = AutoModel(sorted_by="rmse")
     sel.fit(X, y)
     assert sel.best is not None and len(sel.ranking) > 1  # a real fleet was benchmarked
     assert np.all(np.isfinite(sel.predict(X[:5]).y))
@@ -69,7 +69,7 @@ def test_model_selection_defaults_to_recommended_fleet():
 def test_model_selection_refit_refits_winner_only():
     # refit refits the SELECTED winner on new data (no re-selection); the winner is unchanged
     X, y = _data()
-    sel = ModelSelection({"mean": SimpleMean(), "rbf": RBF(kernel="gaussian"), "svr": SVR()}, sorted_by="rmse")
+    sel = AutoModel({"mean": SimpleMean(), "rbf": RBF(kernel="gaussian"), "svr": SVR()}, sorted_by="rmse")
     sel.fit(X[:40], y[:40])
     winner_before = sel.best["label"]
     n_before = sel.model._X.shape[0]
@@ -86,7 +86,7 @@ def test_model_selection_refit_best_false_keeps_fold_model():
     from pysurrogate.core.partitioning import RandomPartitioning
 
     X, y = _data()
-    sel = ModelSelection(
+    sel = AutoModel(
         {"rbf": RBF(kernel="gaussian")},
         sorted_by="rmse",
         refit_best=False,

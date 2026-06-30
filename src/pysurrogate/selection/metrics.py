@@ -2,7 +2,7 @@
 
 A single registry of metrics, each tagged with the data it consumes (point vs. probabilistic),
 the question it answers (accuracy/fit/ranking/selection/calibration), and its direction of
-improvement -- so ``Benchmark`` and ``ModelSelection`` can sort and group results without any
+improvement -- so ``Benchmark`` and ``AutoModel`` can sort and group results without any
 metric-specific code. ``evaluate`` runs the whole suite; ``get_metric``/``calc_metric`` resolve
 and compute one by name.
 """
@@ -37,7 +37,7 @@ class Metric:
         name: Short registry key (e.g. ``"rmse"``).
         func: Implementation: ``func(y, y_hat)`` for point metrics, ``func(y, y_hat, sigma)`` for
             probabilistic ones.
-        greater_is_better: Direction of improvement. Lets ``Benchmark``/``ModelSelection`` sort
+        greater_is_better: Direction of improvement. Lets ``Benchmark``/``AutoModel`` sort
             without a hand-passed ``ascending`` flag. Ignored when ``target`` is set.
         family: One of ``ACCURACY``/``FIT``/``RANKING``/``SELECTION``/``CALIBRATION``.
         kind: ``POINT`` or ``PROBABILISTIC`` (whether ``sigma`` is required).
