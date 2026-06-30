@@ -16,6 +16,93 @@ Severity legend: **[H]** worth doing soon · **[M]** worth doing · **[L]** oppo
 
 ---
 
+## ★ [H] Core unification: one kernel family, one regression basis
+
+The framework currently defines *kernels* in two places and *polynomial bases* in three. Both should
+move to `core/` and be reused everywhere. This is the headline structural cleanup.
+
+### A. `core/regression.py` — the polynomial basis (low-risk, do first)
+
+The same "build a polynomial design matrix `P(X)` (+ its gradient)" exists three times:
+
+| where | form |
+|---|---|
+| `dace/regr.py` | `Constant/Linear/QuadraticRegression` → `F(X)` `(m,p)` + `grad(X)` `(m,d,p)` — the clean version, already first-class objects |
+| `models/rbf.py` | the polynomial **tail**, re-implemented inline as string keys (`"linear"`/`"quadratic"`/`"linear+quadratic"`) in `rbf_kernel`, with a *separate* hand-written `_tail_grad` |
+| `models/regression.py` | `PolynomialRegression` builds polynomial features yet again |
+
+`dace/regr.py`'s `Regression` base **is already the right abstraction**. Promote it verbatim to
+`core/regression.py`:
+
+```python
+# core/regression.py
+class Regression:
+    def __call__(self, X): ...   # design matrix F, shape (m, p)
+    def grad(self, X): ...       # Jacobian per row, shape (m, d, p)
+
+class Constant(Regression): ...
+class Linear(Regression): ...
+class Quadratic(Regression): ...
+```
+
+Then:
+- `dace/` imports trends from `core.regression` (drop `dace/regr.py`, keep names re-exported).
+- `RBF`'s tail becomes "append `Linear()(X)` columns"; `_tail_grad` becomes `Linear().grad(X)` —
+  two bespoke copies deleted.
+- `PolynomialRegression` builds its features from the same `Quadratic`/`Linear`.
+
+**Risk:** low. Pure relocation + call-site swaps; golden stays green (same numbers). This is the safe
+first step.
+
+### B. `core/kernel.py` — one kernel object, `ard` toggles RBF vs DACE
+
+The key insight (yours): **ARD is just "one length-scale per dimension" vs "one shared."** So a single
+kernel object covers both — `ard=False` is the isotropic/RBF use, `ard=True` is the per-dimension/DACE
+use. And `tps`/`mq`/`linear`/etc. can be written in the **DACE `k(D, theta)` style** too, not only as
+RBF scalar-distance functions:
+
+```python
+# core/kernel.py
+class Kernel:
+    def __init__(self, ard=False): ...      # False: shared theta (RBF); True: per-dim theta (DACE)
+    def __call__(self, D, theta): ...       # value on pairwise coordinate differences
+    def dtheta(self, D, theta): ...         # d/dtheta — for likelihood optimization (DACE)
+    def dr(self, D, theta): ...             # spatial derivative — for predict(grad=True) (RBF + DACE)
+
+class Gaussian(Kernel): ...      # valid GP covariance
+class Exponential(Kernel): ...   # valid GP covariance
+class Cubic(Kernel): ...
+class Matern(Kernel): ...
+class ThinPlateSpline(Kernel): ...   # radial basis; conditionally-PD (needs the polynomial tail)
+class Multiquadric(Kernel): ...      # radial basis; conditionally-PD
+```
+
+`Dace` uses the GP-covariance kernels (typically `ard=True`); `RBF` can use **any** of them
+(typically `ard=False`) plus its polynomial tail. The kernel zoo is defined **once**.
+
+**Two real details to handle (not blockers, just the actual work):**
+1. **ARD needs per-dimension information.** RBF today feeds the kernel a single *squared scalar*
+   distance `r`; ARD needs the per-dimension differences (to scale each axis by its own theta). So
+   the unified kernel must receive coordinate differences `D` (what DACE already passes), and RBF's
+   scalar-`r` path moves to that representation. `ard=False` then just means "all thetas equal."
+2. **Not every kernel is a valid GP covariance.** `tps`/`mq` are only conditionally positive-definite,
+   so used as a raw Kriging correlation they can give a non-PD `R`. That's already handled by the
+   *never-raise / infeasible* contract (`DaceFitError` → the optimizer steps around it), and RBF makes
+   them well-posed via the polynomial tail. So the kernel object is shared; **whether a given model
+   accepts a given kernel stays the model's concern** — we don't pretend `tps` is a covariance.
+
+**Risk:** medium — touches the golden-critical DACE kernel path, so each kernel migrates with golden
+as the anchor (the existing 19 snapshots prove the DACE kernels are byte-identical after the move).
+
+### Why this is worth it
+- One kernel zoo and one basis instead of 2× and 3× copies — bug-fixes and new kernels land once.
+- `RBF` and `Dace` become two *configurations* of the same machinery (kernel + optional tail +
+  optional theta-search), which is what they mathematically are.
+- It makes the `core` layer the real home of the modeling primitives, with `dace`/`models` as
+  assemblies on top — matching the layering the rest of the framework already follows.
+
+---
+
 ## 1. [H] Two parallel function-benchmark stacks
 
 **Where:** `selection/study.py` (`study()` / `StudyResult`) vs `selection/benchmark.py`
@@ -87,15 +174,21 @@ postprocess un-normalization. It borrows only `Model.__init__`'s `_validation`/`
 "is-a `Model`" claim is misleading: it is really a *composition* facade that delegates to a chosen
 sub-model.
 
-**Proposal.** Pick one:
-- **(a) Genuine `Model`:** implement `_fit` = run benchmark + store the winner prototype, `_predict`
-  = delegate to the winner. The lifecycle then owns pre/postprocess uniformly. Cleanest if you want
-  `ModelSelection` to behave *exactly* like any model (including normalization).
-- **(b) Honest facade:** stop inheriting `Model`; document it as a selector that *contains* a Model
-  and forwards `fit`/`predict`/`refit`. Simpler, and avoids pretending the lifecycle runs.
+**The drop-in `fit`/`predict` is a feature, not the problem.** Being able to hand a selector to
+anything that expects a model — `fit`, then `predict` — is genuinely convenient UX and worth
+keeping. So the real issue is **honesty + naming**, not the model-like interface.
 
-I lean (b) unless you specifically want selection-time input normalization (most sub-models
-normalize themselves anyway).
+**Proposal — make it a genuine `Model`, and rename it:**
+- **Genuine `Model`:** implement `_fit` = run the benchmark + store the winning prototype, `_predict`
+  = delegate to the winner. The lifecycle then *actually* owns pre/postprocess, so the `is-a Model`
+  claim becomes true and the convenient `fit`/`predict` surface is real, not faked.
+- **Rename** from `ModelSelection` (which names a *process*) to something that names *a model that
+  picks its own implementation*: e.g. **`AutoModel`** / **`AutoSurrogate`** / `BestModel`. The user
+  thinks of it as "a surrogate that auto-selects," and the name should say that. Keep
+  `ModelSelection` as a thin deprecated alias for one release if anything imports it.
+
+(The earlier "honest facade that doesn't inherit `Model`" option is now *rejected* — it would throw
+away the convenient drop-in interface, which is the thing worth preserving.)
 
 ---
 
@@ -221,7 +314,10 @@ the exponent). At minimum, correct the KNN docstring to say it weights by square
 - **`kernel_gaussian(sigma=None)`** default would raise on a bare call; it only works because the
   RBF model always passes `sigma`. **Proposal:** give it a real default.
 
-These are semantic/numeric decisions, so they belong here rather than in the mechanical pass.
+These are semantic/numeric decisions, so they belong here rather than in the mechanical pass — and
+they are naturally resolved while rewriting the kernels into the shared `core/kernel.py`
+(★ section): a correct `Gaussian`, a `period`-parametrized periodic kernel, and real defaults all
+land as part of defining the unified kernel zoo once.
 
 ---
 
@@ -296,7 +392,12 @@ behavioral bug fixes.
 ## Suggested order of attack
 
 1. **#4** (exports) — trivial, immediately improves discoverability of the optimizer layer.
-2. **#1** (one benchmark engine) — biggest reduction in duplicated surface.
-3. **#2** (`Dace` ↔ `Model` API alignment) — biggest reduction in long-term user friction.
-4. **#3** (`ModelSelection` honesty), **#5** (trajectory contract), **#6** (RNG) — clean up the seams.
-5. The **[L]** items as opportunistic polish.
+2. **★A** (`core/regression.py` basis) — low-risk, deletes 3→1 copies, golden stays green. The first
+   concrete unification step.
+3. **★B** (`core/kernel.py`, `ard` toggle) — medium-risk, golden-anchored; makes `RBF` and `Dace`
+   two configurations of one kernel family.
+4. **#1** (one benchmark engine) — biggest reduction in duplicated surface.
+5. **#2** (`Dace` ↔ `Model` API alignment) + **#3** (`AutoModel`: genuine `Model` + rename) — biggest
+   reduction in long-term user friction.
+6. **#5** (trajectory contract), **#6** (RNG) — clean up the optimizer/core seams.
+7. The **[L]** items as opportunistic polish (several fold into ★B automatically).
