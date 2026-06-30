@@ -1,419 +1,381 @@
-# pysurrogate — architecture review & redesign proposal
+# pysurrogate — refactor handoff
 
-A design-level companion to a code-quality pass over the whole framework. The pass was driven by
-a multi-agent review (one reviewer per subsystem + a cross-cutting architecture reviewer), with
-every finding adversarially re-checked against the real source. This document collects the
-**architecture-level** findings — the ones that are *design decisions*, not mechanical fixes — and
-proposes concrete redesigns. The smaller, safe fixes were already applied (see the last section);
-everything below is left for you to decide, because each changes a public surface, a default, or a
-reproducible output.
-
-The framework is in good shape: layering is mostly clean (`core` → `dace`/`models`/`optimizer` →
-`selection`), the new generic optimizer layer is a genuine improvement, and `pyclawd check` + 19
-golden snapshots are green. The items below are about making the *seams* consistent.
-
-Severity legend: **[H]** worth doing soon · **[M]** worth doing · **[L]** opportunistic.
+**You are an agent picking up a refactor of the `pysurrogate` framework.** This document is
+self-contained: read it top-to-bottom, then execute the tasks in **Backlog** order. Each task says
+what to change, which files, how to verify, and when it's done. You do **not** need any prior
+conversation — everything you need is here or in `AGENTS.md`.
 
 ---
 
-## ★ [H] Core unification: one kernel family, one regression basis
+## 1. Orientation (read first, ~5 min)
 
-The framework currently defines *kernels* in two places and *polynomial bases* in three. Both should
-move to `core/` and be reused everywhere. This is the headline structural cleanup.
+`pysurrogate` is a surrogate-modeling toolkit (sampling, fitting, model selection). It is driven by
+**pyclawd** — read `AGENTS.md` in the repo root for the full operational contract. The layering:
 
-### A. `core/regression.py` — the polynomial basis (low-risk, do first)
-
-The same "build a polynomial design matrix `P(X)` (+ its gradient)" exists three times:
-
-| where | form |
-|---|---|
-| `dace/regr.py` | `Constant/Linear/QuadraticRegression` → `F(X)` `(m,p)` + `grad(X)` `(m,d,p)` — the clean version, already first-class objects |
-| `models/rbf.py` | the polynomial **tail**, re-implemented inline as string keys (`"linear"`/`"quadratic"`/`"linear+quadratic"`) in `rbf_kernel`, with a *separate* hand-written `_tail_grad` |
-| `models/regression.py` | `PolynomialRegression` builds polynomial features yet again |
-
-`dace/regr.py`'s `Regression` base **is already the right abstraction**. Promote it verbatim to
-`core/regression.py`:
-
-```python
-# core/regression.py
-class Regression:
-    def __call__(self, X): ...   # design matrix F, shape (m, p)
-    def grad(self, X): ...       # Jacobian per row, shape (m, d, p)
-
-class Constant(Regression): ...
-class Linear(Regression): ...
-class Quadratic(Regression): ...
+```
+core/        backend-agnostic primitives
+  model.py          Model: the fit/predict/refit lifecycle (pre/postprocess, normalization)
+  prediction.py     Prediction result type + predictions_frame (tidy DataFrame)
+  optimizer.py      generic Problem / Optimizer / Callback contract  (NEW layer)
+  sampling.py       Sampling / LHS / Random
+  transformation.py normalization transforms
+  partitioning.py   cross-validation splits
+dace/         DACE Kriging engine (the flagship surrogate)
+  dace.py           Dace: fit / predict / theta search
+  fit.py            GLS fit() + batch_obj_grad (likelihood + analytic gradient)
+  corr.py           correlation kernels (Gaussian/Exponential/Matern/Cubic/...)
+  regr.py           regression trend basis (Constant/Linear/Quadratic)
+  problem.py        DaceProblem: likelihood as a generic Problem
+  selection.py      ValidationSelection callback
+optimizer/    generic optimizers over a Problem: lbfgs / boxmin / adam / pattern / restart
+models/       Model backends: kriging / rbf / idw / knn / forest / svr / regression / mean
+selection/    benchmark / metrics / study / factory  (benchmarking + AutoModel)
+util/         dist / misc / test_functions
 ```
 
-Then:
-- `dace/` imports trends from `core.regression` (drop `dace/regr.py`, keep names re-exported).
-- `RBF`'s tail becomes "append `Linear()(X)` columns"; `_tail_grad` becomes `Linear().grad(X)` —
-  two bespoke copies deleted.
-- `PolynomialRegression` builds its features from the same `Quadratic`/`Linear`.
+Mental model after a recent refactor: the **generic optimizer layer** (`core/optimizer.py`,
+`core/sampling.py`, `optimizer/*`, `dace/problem.py`, `dace/selection.py`) is deliberate and good —
+do **not** undo it. `Dace` drives it: `optimizer=None` freezes theta, an optimizer present searches,
+`theta_bounds=None` means an *unbounded* search (not "freeze"), noise is just another search
+coordinate.
 
-**Risk:** low. Pure relocation + call-site swaps; golden stays green (same numbers). This is the safe
-first step.
+---
 
-> **Context (decided):** `RBF` is a *temporary* implementation — the `Dace` engine is always the
-> better surrogate. So the kernel unification is **not** about preserving RBF; it is about giving the
-> kernel zoo a single clean home in `core/`, with the option to either **retire `RBF`** or re-express
-> it as a thin "DACE kernels + polynomial tail, no theta-search" configuration. Because we are not
-> preserving RBF's separate scalar-distance path, the two "real details" below mostly evaporate (see
-> the note after the sketch). The `ard` design still matters: it is how *one* kernel object serves
-> both the isotropic and the per-dimension use without duplication.
+## 2. Working agreement (non-negotiable)
 
-### B. `core/kernel.py` — one kernel object, `ard` toggles isotropic vs per-dimension
+1. **Run Python only via `pyclawd python`.** Never bare `python`/`pip`.
+2. **The gate after every change — both must stay green:**
+   - `pyclawd check` → format-check, lint, typecheck, descriptions, tests.
+   - `pyclawd golden` → 19 DACE behavior snapshots. **These numbers must not drift.** golden is the
+     behavior oracle: a clean refactor can still move a number, and golden is what catches it.
+3. **If golden drifts:** that is a *real regression* until proven intended. Fix the cause. Do **not**
+   run `pyclawd golden update` to paper over it — blessing a baseline is a **human** step
+   (AGENTS.md: "agents compare, humans bless"). If you believe a drift is genuinely intended, stop
+   and surface it to the user with the `git diff` of the baseline.
+4. **Small, verified batches.** One coherent change → run the gate → only then continue. Add a
+   regression test for every behavior change.
+5. **Do not `git commit` / `git push` unless the user explicitly asks** (AGENTS.md: ask first). Leave
+   work in the tree; tell the user it's ready.
+6. **Match existing style.** Google-style docstrings (no types in the docstring — annotations carry
+   them); every module opens with a one-line docstring (the `descriptions` gate enforces it). Read a
+   neighbor file before writing a new one.
+7. **When a task touches the public API or a default,** make the change but call it out clearly in
+   your summary so the user can veto.
 
-The key insight (yours): **ARD is just "one length-scale per dimension" vs "one shared."** So a single
-kernel object covers both — `ard=False` is the isotropic/RBF use, `ard=True` is the per-dimension/DACE
-use. And `tps`/`mq`/`linear`/etc. can be written in the **DACE `k(D, theta)` style** too, not only as
-RBF scalar-distance functions:
+Verification cheatsheet:
+```bash
+pyclawd check                 # full gate
+pyclawd golden                # behavior oracle (must stay 19/19)
+pyclawd test -k EXPR          # run a subset by keyword
+pyclawd test path::node       # run one test
+pyclawd test all              # include slow tier before declaring a big task done
+```
+
+---
+
+## 3. Already done — do NOT redo
+
+A quality + review pass already landed (all gated green, with regression tests). Treat this as the
+baseline; don't re-discover it:
+
+- **Bugs fixed:** `SimpleMean` multi-output; `Standardization` zero-std guard; `Plog` int truncation;
+  `Model.predict` failed-fit row-count + exception-flag; `Sampling` empty `(0,p)` shape; `Benchmark`
+  target-aware ranking via the shared `metrics.metric_sort_key` (also used by `StudyResult`);
+  `AutoModel`/`Benchmark` forward the `optimize` flag; `RBF` honors the fit-time `optimize`; `Adam`
+  masks infeasible gradients.
+- **Hygiene:** `Transformation` is now `ABC`; `kernel_tps` no longer mutates input; dead `calc_grad`
+  and a no-op `super().__init__()` removed; stale docstrings corrected; distance helper / re-export
+  centralized; a per-fold `set()` hoisted.
+- **Rename done:** `ModelSelection` → **`AutoModel`** (clean, no alias — nothing is published yet).
+  Exported from `pysurrogate` and `pysurrogate.selection`.
+
+---
+
+## 4. Backlog — execute in this order
+
+Each task is independent enough to do and verify on its own. Severity: **[H]** high value · **[M]** ·
+**[L]** opportunistic. Stop and ask the user before starting any **[H]** task that changes the public
+API (Tasks 5 and 6 are flagged).
+
+---
+
+### Task 1 — Surface the public API at the package root  ·  [M] · low risk
+
+**Why.** `pysurrogate/__init__.py` exports only `Dace, Kriging, Model, Prediction, Benchmark,
+AutoModel, cartesian`. The generic optimizer layer (`Optimizer`, `Problem`, `Callback`, `Sampling`,
+`LBFGS`/`PatternSearch`/`Boxmin`/`Adam`/`Restart`) and the study/selection front-ends
+(`study`, `FunctionBenchmark`, `score`) are unreachable from the root — yet `Dace`'s own docstring
+tells users to pass `optimizer=Boxmin()` / `LBFGS()` by bare name. The headline abstraction is
+undiscoverable.
+
+**Do.** Add the optimizer-layer names and the study/selection front-ends to `pysurrogate/__init__.py`
+(and its `__all__`). Either export at the root or via documented `pysurrogate.optimizer` /
+`pysurrogate.selection` namespaces the docstrings point to. At minimum, every name the `Dace`
+docstring references must be importable as written.
+
+**Files.** `src/pysurrogate/__init__.py` (+ check `optimizer/__init__.py`, `selection/__init__.py`,
+`core/__init__.py` re-export what you need).
+
+**Verify.** `pyclawd python -c "import pysurrogate; from pysurrogate import LBFGS, Boxmin, Optimizer, Problem, Sampling"`;
+`pyclawd check`. (golden unaffected.)
+
+**Done when.** Every optimizer/sampling/selection name a user needs is importable from `pysurrogate`,
+`__all__` lists them, `pyclawd check` green.
+
+---
+
+### Task 2 — `core/regression.py`: one polynomial basis  ·  ★ [H] · low risk · **do this first of the structural tasks**
+
+**Why.** "Build a polynomial design matrix `P(X)` (+ gradient)" exists three times:
+`dace/regr.py` (`Constant/Linear/QuadraticRegression`, the clean first-class version),
+`models/rbf.py` (the polynomial *tail*, re-implemented inline as string keys in `rbf_kernel`, with a
+separate hand-written `_tail_grad`), and `models/regression.py` (`PolynomialRegression`). One
+implementation should serve all three.
+
+**Do.**
+1. Create `core/regression.py` and move `dace/regr.py`'s `Regression` base + `Constant/Linear/
+   Quadratic` there verbatim (the API is already right: `__call__(X) -> (m,p)`, `grad(X) -> (m,d,p)`).
+   Keep the `dace` names working (re-export from `dace/regr.py` or update `dace` imports).
+2. Rebuild `models/rbf.py`'s polynomial tail on it: the tail columns become `Linear()(X)` /
+   `Quadratic()(X)`, and `_tail_grad` becomes the basis `.grad(X)`. Delete the bespoke copies.
+3. Have `models/regression.py` build its features from the same basis.
+
+**Files.** new `core/regression.py`; `dace/regr.py`, `dace/dace.py` (imports); `models/rbf.py`,
+`models/regression.py`; `core/__init__.py` (export).
+
+**Verify.** `pyclawd golden` (DACE trend is golden-critical — must stay byte-identical);
+`pyclawd check`; `pyclawd test -k "rbf or regression"`. Add a small test asserting the RBF tail
+columns equal the basis output.
+
+**Done when.** Three basis implementations collapse to one in `core/`, golden 19/19, check green.
+
+**Risk.** Low — pure relocation + call-site swaps, same numbers.
+
+---
+
+### Task 3 — `core/kernel.py`: one kernel object, `ard` toggle  ·  ★ [H] · medium risk
+
+**Why.** Kernels are defined twice: `dace/corr.py` (`k(D, theta)` style, per-dim `theta`, analytic
+`theta`-gradient, valid GP covariances) and `models/rbf.py` (`kernel_*` on a scalar squared distance,
+scalar `sigma`, `dkernel_*` derivatives, includes conditionally-PD radial bases `tps`/`mq`). They are
+the *same idea* at different parametrizations.
+
+**Key design (decided with the user):** ARD is just "one length-scale per dimension" vs "one shared."
+So a **single** kernel object covers both via an `ard` flag — `ard=False` is the isotropic/RBF use,
+`ard=True` the per-dimension/DACE use. And `tps`/`mq` get written in the **same `k(D, theta)` style**
+(not as RBF scalar-distance functions), living in the one zoo with `ard=False` as their natural
+setting.
 
 ```python
-# core/kernel.py
+# core/kernel.py — target shape
 class Kernel:
-    def __init__(self, ard=False): ...      # False: shared theta (RBF); True: per-dim theta (DACE)
-    def __call__(self, D, theta): ...       # value on pairwise coordinate differences
-    def dtheta(self, D, theta): ...         # d/dtheta — for likelihood optimization (DACE)
-    def dr(self, D, theta): ...             # spatial derivative — for predict(grad=True) (RBF + DACE)
+    def __init__(self, ard=False): ...   # False: shared theta; True: per-dim theta
+    def __call__(self, D, theta): ...    # value on pairwise coordinate differences
+    def dtheta(self, D, theta): ...      # d/dtheta — likelihood optimization (DACE)
+    def dr(self, D, theta): ...          # spatial derivative — predict(grad=True)
 
 class Gaussian(Kernel): ...      # valid GP covariance
-class Exponential(Kernel): ...   # valid GP covariance
+class Exponential(Kernel): ...
 class Cubic(Kernel): ...
 class Matern(Kernel): ...
-class ThinPlateSpline(Kernel): ...   # radial basis; conditionally-PD (needs the polynomial tail)
-class Multiquadric(Kernel): ...      # radial basis; conditionally-PD
+class ThinPlateSpline(Kernel): ...   # conditionally-PD radial basis
+class Multiquadric(Kernel): ...
 ```
 
-`Dace` uses the GP-covariance kernels (typically `ard=True`); `RBF` can use **any** of them
-(typically `ard=False`) plus its polynomial tail. The kernel zoo is defined **once**.
+**Context (decided):** `RBF` is a **temporary** implementation — `Dace` is always the better
+surrogate. So this task is **not** about preserving RBF. It is about giving the kernel zoo one clean
+home in `core/`. `RBF` should then either be **retired** or rebuilt as a thin "shared kernel +
+polynomial tail (Task 2), no theta-search" `Model`. Because RBF's separate scalar-distance path is
+not being preserved, the kernel just takes coordinate differences `D` (what DACE already passes) —
+there's no second representation to reconcile.
 
-**The two former "details", now that RBF is not being preserved:**
-1. **ARD needs per-dimension information.** A kernel feeds on coordinate differences `D` (what DACE
-   already passes), so `ard=True` scales each axis by its own theta and `ard=False` shares one theta.
-   Since RBF's separate scalar-`r` path is going away (RBF retired or rebuilt on the DACE
-   representation), there is no second representation to reconcile — the kernel just takes `D`.
-2. **Not every kernel is a valid GP covariance.** `tps`/`mq` are only conditionally positive-definite,
-   so as a raw Kriging correlation they can give a non-PD `R`. Already handled by the *never-raise /
-   infeasible* contract (`DaceFitError` → the optimizer steps around it). If a tail-based RBF-style
-   model is kept, the polynomial tail makes them well-posed. Either way, **whether a given model
-   accepts a given kernel stays the model's concern** — we don't pretend `tps` is a covariance.
+**Do.**
+1. Define `core/kernel.py` with the `Kernel` protocol above (port `dace/corr.py`'s kernels; add the
+   `ard` flag — `ard=True` reproduces today's per-dim DACE behavior exactly).
+2. Point `Dace` at `core.kernel` (keep `dace/corr.py` names re-exported, or update imports).
+3. Decide RBF's fate with the user (retire vs rebuild). If rebuilt, express its kernels (incl.
+   `tps`/`mq`) as `core.kernel` kernels with `ard=False` + the Task-2 polynomial tail.
+4. While here, fix the kernel correctness items from Task 9's RBF notes *as part of defining the zoo*
+   (a correct Gaussian, a `period`-parametrized periodic kernel, real defaults).
 
-**Risk:** medium — touches the golden-critical DACE kernel path, so each kernel migrates with golden
-as the anchor (the existing 19 snapshots prove the DACE kernels are byte-identical after the move).
-Writing `tps`/`mq` in the `k(D, theta)` style (per your note) lets them live in the same zoo with
-`ard=False` as their natural setting.
+**Files.** new `core/kernel.py`; `dace/corr.py`, `dace/dace.py`, `dace/problem.py`; `models/rbf.py`;
+`core/__init__.py`.
 
-### Why this is worth it
-- One kernel zoo and one basis instead of 2× and 3× copies — bug-fixes and new kernels land once.
-- The `core` layer becomes the real home of the modeling primitives, with `dace`/`models` as
-  assemblies on top — matching the layering the rest of the framework already follows.
-- It clarifies the path for `RBF`: either delete it, or make it a thin "shared kernel + polynomial
-  tail, no theta-search" `Model` — no longer a parallel kernel implementation.
+**Verify.** `pyclawd golden` is the anchor — migrate **one kernel at a time** and re-run golden after
+each; the 19 snapshots prove the DACE kernels are byte-identical after the move. `pyclawd check`;
+`pyclawd test -k "kernel or corr or matern or cubic"`. Add tests that `ard=False` with equal thetas
+matches the old isotropic behavior and `ard=True` matches the per-dim DACE path.
 
----
+**Done when.** Kernels live once in `core/kernel.py`; `Dace` uses them with golden 19/19 byte-identical;
+RBF retired or rebuilt on the shared zoo; check green.
 
-## 1. [H] Two parallel function-benchmark stacks
-
-**Where:** `selection/study.py` (`study()` / `StudyResult`) vs `selection/benchmark.py`
-(`FunctionBenchmark` / `score`).
-
-**Problem.** These are two independent implementations of one job: *sample a known function over a
-box, fit a model fleet across repeated draws, score with the metric registry, rank
-direction-aware*. They share nothing:
-
-| concern        | `study()` / `StudyResult`            | `FunctionBenchmark` / `score`             |
-|----------------|--------------------------------------|-------------------------------------------|
-| sampling       | private `_sample` (`'lhs'`/`'random'`) | `core.sampling.Sampling(LHS()/Random())`  |
-| sigma handling | private `_predict_with_sigma`        | `predictions_frame` (already clamps)      |
-| result shape   | nested dicts + bespoke `StudyResult` | tidy predictions DataFrame + `score`      |
-| ranking        | `StudyResult.ranking` (now shared key) | `Benchmark`-style                       |
-
-A user faces two unrelated APIs for one task, and every metric/bugfix must be applied twice.
-`study._sample`'s LHS branch is byte-for-byte `core.sampling.LHS.__call__`; `_predict_with_sigma`
-re-implements the NaN-sigma clamp `predictions_frame` already owns.
-
-**Proposal.** Collapse to one engine. Make `study()` a thin front-end that builds a
-`FunctionBenchmark`, runs it, and reduces the resulting predictions DataFrame via `score` /
-groupby. `StudyResult` survives only as a reporting view (its `__str__`/`ranking` over the shared
-frame) if its console output is valued. Net: delete `_sample` and `_predict_with_sigma`, one
-sampler, one sigma policy, one scoring path. This also resolves the two duplication findings
-(`study._sample` re-implements `core.sampling`; `_predict_with_sigma` re-implements
-`predictions_frame`).
+**Risk.** Medium — touches the golden-critical DACE kernel path. Golden makes it safe if you migrate
+incrementally.
 
 ---
 
-## 2. [H] `Dace`'s public API diverges from the `Model` contract
+### Task 4 — One function-benchmark engine  ·  [H] · medium risk
 
-**Where:** `dace/dace.py` vs `core/model.py` (and `models/kriging.py`, which bridges them).
+**Why.** `selection/study.py` (`study()` / `StudyResult`) and `selection/benchmark.py`
+(`FunctionBenchmark` / `score`) are two independent implementations of one job: sample a known
+function over a box, fit a model fleet across draws, score with the metric registry, rank
+direction-aware. They share nothing — `study._sample` is a hand-rolled copy of `core.sampling`,
+`study._predict_with_sigma` re-implements `predictions_frame`'s NaN-sigma clamp. A user faces two
+unrelated APIs for one task.
 
-**Problem.** `Dace` is the flagship engine, but its surface does not match the `Model` contract
-that every other backend follows, so `Kriging` exists partly as a translation shim:
+**Do.** Make `study()` a thin front-end over `FunctionBenchmark`: it builds the benchmark, runs it,
+and reduces the resulting predictions DataFrame via `score` / groupby. Delete `study._sample`
+(use `core.sampling.Sampling`) and `_predict_with_sigma` (use `predictions_frame`). Keep
+`StudyResult` only as a reporting view over the shared frame if its `__str__`/`ranking` output is
+valued (its `ranking` already uses the shared `metric_sort_key`).
 
-| operation | `Model` (and all backends)            | `Dace`                                      |
-|-----------|---------------------------------------|---------------------------------------------|
-| predict   | `predict(X, var=False, grad=False)`   | `predict(_X, mse=False, grad=False)`        |
-| fit lever | `fit(X, y, optimize=True)`            | `fit(X, Y, validation, append)` + `optimizer=`|
-| refit     | `refit(X, y, optimize)`               | `refit(X, Y, optimize, validation=True)`    |
+**Files.** `src/pysurrogate/selection/study.py`, `src/pysurrogate/selection/benchmark.py`.
 
-Three different signatures for fit/predict/refit between `Dace` and `Kriging`/`Model`. The leading
-underscore on `Dace.predict(_X, ...)` is a public parameter that reads as private, and `mse=` vs
-`var=` forces `Kriging._predict` to translate.
+**Verify.** `pyclawd test -k "study or function_benchmark"`; `pyclawd check`. Pin the new `study()`
+output against the old (a golden-style snapshot test of a small deterministic study is worth adding).
 
-**Proposal.** Align `Dace` to the `Model` vocabulary:
-- rename `predict(_X, mse=...)` → `predict(X, var=...)`. Keep `mse=` as a deprecated alias if the
-  DACE-literate audience expects it (mirror `Prediction.mse`, which already aliases `var`).
-- reconcile the "don't search" lever so `optimize=` / `optimizer=None` / `validation` mean the same
-  thing across the two front-ends — ideally `Dace.fit` grows an `optimize=True` that maps to
-  "use the configured optimizer vs freeze", matching `Model.fit`, with `optimizer=` remaining the
-  *strategy* choice.
-
-This is the change most likely to reduce long-term friction, but it touches the public API — hence
-proposal, not auto-applied.
+**Done when.** One sampler, one sigma policy, one scoring path; `study()` delegates to
+`FunctionBenchmark`; tests green.
 
 ---
 
-## 3. [M] `AutoModel` (was `ModelSelection`) — renamed ✓; still bypasses the lifecycle
+### Task 5 — Align `Dace` with the `Model` contract  ·  [H] · **PUBLIC API — confirm with user first**
 
-> **Done:** renamed `ModelSelection` → **`AutoModel`** (clean rename, no alias — nothing is
-> published yet). The remaining work below is making the inheritance *honest*.
+**Why.** `Dace` (flagship) doesn't match the `Model` contract every other backend follows, so
+`Kriging` partly exists to translate:
 
+| op | `Model` / backends | `Dace` |
+|---|---|---|
+| predict | `predict(X, var=False, grad=False)` | `predict(_X, mse=False, grad=False)` |
+| fit lever | `fit(X, y, optimize=True)` | `fit(X, Y, validation, append)` + `optimizer=` |
+| refit | `refit(X, y, optimize)` | `refit(X, Y, optimize, validation=True)` |
 
-**Where:** `selection/benchmark.py`.
+The leading-underscore `_X` is a public param that reads as private; `mse=` vs `var=` forces
+`Kriging._predict` to translate.
 
-**Problem.** `AutoModel` subclasses `Model` yet overrides `fit`/`predict`/`refit`/`records`
-and never implements `_fit`/`_predict`. None of the machinery `Model` advertises runs —
-normalization, nan/inf filtering, duplicate elimination, active-dims, exception capture,
-postprocess un-normalization. It borrows only `Model.__init__`'s `_validation`/`_epoch` fields. The
-"is-a `Model`" claim is currently faked: it is really a *composition* facade that delegates to a
-chosen sub-model.
+**Do.** Rename `Dace.predict(_X, mse=...)` → `predict(X, var=...)`; reconcile the "don't search" lever
+so `optimize=` / `optimizer=None` / `validation` mean the same across `Dace` and `Kriging`/`Model`
+(ideally `Dace.fit` grows `optimize=True` mapping to "use the configured optimizer vs freeze", with
+`optimizer=` remaining the *strategy* choice). Update `Kriging` to drop the translation shim.
 
-**The drop-in `fit`/`predict` is a feature, not the problem.** Being able to hand an `AutoModel` to
-anything that expects a model — `fit`, then `predict` — is genuinely convenient UX and worth
-keeping. So the real issue is **honesty**, not the model-like interface. (The name is now `AutoModel`,
-which says "a surrogate that auto-selects" — done.)
+**Files.** `src/pysurrogate/dace/dace.py`, `src/pysurrogate/models/kriging.py`, plus the many DACE
+tests that call `predict(mse=...)` / `fit(...)`.
 
-**Remaining proposal — make it a *genuine* `Model`:** implement `_fit` = run the benchmark + store
-the winning prototype, `_predict` = delegate to the winner. The lifecycle then *actually* owns
-pre/postprocess, so the `is-a Model` claim becomes true and the convenient `fit`/`predict` surface is
-real, not faked.
+**Verify.** `pyclawd golden` (numbers must not move — this is a signature change, not a math change);
+`pyclawd check`; full `pyclawd test`.
 
-(The earlier "honest facade that doesn't inherit `Model`" option is *rejected* — it would throw away
-the convenient drop-in interface, which is the thing worth preserving.)
-
----
-
-## 4. [M] The package root hides the headline abstractions
-
-**Where:** `pysurrogate/__init__.py`.
-
-**Problem.** The root exports only `Dace, Kriging, Model, Prediction, Benchmark, ModelSelection,
-cartesian`. The deliberately-built generic optimizer layer (`Optimizer`, `Problem`, `Callback`,
-`Sampling`, `LBFGS`/`PatternSearch`/`Boxmin`/`Adam`/`Restart`) is **not** reachable from the root,
-nor are `study` / `FunctionBenchmark` / `score`. Yet `Dace`'s own docstring tells users to pass
-`optimizer=Boxmin()` / `LBFGS()` by bare name — names only importable via
-`from pysurrogate.optimizer import ...`. The newest, most reusable contract is the least
-discoverable.
-
-**Proposal.** Surface the optimizer layer and the study/selection front-ends at the root (or via
-documented `pysurrogate.optimizer` / `pysurrogate.selection` namespaces the docstrings point to).
-At minimum, export the optimizer names the `Dace` docstring already references.
+**Done when.** `Dace` and `Kriging` share the `Model` vocabulary; `Kriging` no longer translates;
+golden 19/19, check green.
 
 ---
 
-## 5. [M] Optimizer trajectory (`visited`) is an ad-hoc Boxmin↔Dace side-channel
+### Task 6 — Make `AutoModel` a *genuine* `Model`  ·  [M] · **behavior-adjacent — confirm with user**
 
-**Where:** `optimizer/boxmin.py` (defines `self.visited`) ↔ `dace/dace.py`
-(`getattr(self.optimizer, "visited", None)`).
+**Why.** `AutoModel` subclasses `Model` but overrides `fit`/`predict`/`refit`/`records` and never
+implements `_fit`/`_predict`, so none of the lifecycle (normalization, nan/inf filtering, duplicate
+elimination, active-dims, postprocess) actually runs — the `is-a Model` claim is faked. The drop-in
+`fit`/`predict` UX is the *good* part and must stay; the issue is honesty. (The name is already fixed:
+it's `AutoModel`, "a surrogate that auto-selects".)
 
-**Problem.** Only `Boxmin` records `visited`; `LBFGS`/`PatternSearch`/`Adam`/`Restart` do not. `Dace`
-reaches in via `getattr`, so the theta-trajectory snapshot silently exists for `Boxmin` and
-silently vanishes for every other optimizer. The base `Optimizer` contract
-(`core/optimizer.py`) never mentions a trajectory hook — it is an undocumented protocol between two
-classes.
+**Do.** Implement `_fit` = run the benchmark + store the winning prototype, `_predict` = delegate to
+the winner, so the `Model` lifecycle genuinely owns pre/postprocess. Remove the ad-hoc overrides that
+duplicate `Model`.
 
-**Proposal.** Promote it into the contract: declare `visited` (default `None`/empty) on the
-`Optimizer` base with documented semantics, or have the base `_emit` optionally append to a
-base-level trajectory list. Then `Dace` consumes a *documented* attribute, and any optimizer can
-opt in. (Boxmin/pattern searches populate it; gradient methods may leave it empty — that's fine, as
-long as it's contractual.)
+**Files.** `src/pysurrogate/selection/benchmark.py` (the `AutoModel` class).
 
----
+**Verify.** `pyclawd test -k "selection or auto"`; `pyclawd check`. Confirm the existing AutoModel
+tests still pass and add one asserting the lifecycle runs (e.g. normalization is applied).
 
-## 6. [M] Two core randomness conventions: `Partitioning` reseeds globals, `Sampling` threads a Generator
-
-**Where:** `core/partitioning.py` (`random.seed` + `np.random.seed`, then global `random.shuffle` /
-`np.random.permutation`) vs `core/sampling.py` (explicit `np.random.Generator`).
-
-**Problem.** `Partitioning.do` reseeds the **process-global** RNGs and the subclasses consume the
-module globals. So calling `do()` perturbs any other code relying on global numpy/random state, and
-concurrent partitionings interfere. The sampling layer does the right thing with a threaded
-`Generator`. Two opposite conventions for the framework's two randomness consumers.
-
-**Proposal.** Switch `Partitioning` to a local `np.random.default_rng(self.seed)` (and a local
-`random.Random(self.seed)` if Python-`random` shuffling is kept), threaded through `_folds`,
-matching `Sampling`.
-
-**Caveat (why this was *not* auto-applied):** `default_rng(seed).permutation` produces a *different*
-sequence than `np.random.seed(seed); np.random.permutation`, so fold assignments shift. Any test or
-golden that pins specific CV outputs would need re-blessing. Worth doing, but it is a deliberate
-reproducibility change for a human to bless.
+**Done when.** `AutoModel` is a real `Model` with the same convenient interface; tests green.
 
 ---
 
-## 7. [L] Per-optimizer accounting & gradient-detection are inconsistent
+### Task 7 — Promote the optimizer trajectory into the contract  ·  [M] · low risk
 
-**Where:** `optimizer/{lbfgs,adam,boxmin}.py`.
+**Why.** Only `Boxmin` defines `self.visited`; `Dace` reaches in via
+`getattr(self.optimizer, "visited", None)` (`dace/dace.py`). So the theta-trajectory snapshot silently
+exists for `Boxmin` and vanishes for every other optimizer — an undocumented side-channel, not part of
+the `Optimizer` contract.
 
-Three small contract inconsistencies in the otherwise-clean optimizer layer:
-- **`n_evals` undercounts.** `Boxmin._relocate` (up to 64 feasibility probes) and `LBFGS`'s
-  gradient-detection probe both call `self.problem(...)` without incrementing `n_evals`. `n_evals`
-  is surfaced on `Result`, so it under-reports the true cost — and for a `DaceProblem` each probe is
-  a full GLS solve.
-- **Gradient detection differs.** `LBFGS` spends a throwaway problem evaluation in `setup` just to
-  learn whether `.grad` exists; `Adam` checks lazily in `_advance`. Two conventions for one question.
-- **Fail-fast timing differs.** `Adam` raises "requires analytic gradient" mid-run in `_advance`,
-  whereas `requires_x0` fails fast in `setup`.
+**Do.** Declare `visited` (default `None`/empty) on the `Optimizer` base in `core/optimizer.py` with
+documented semantics, or have the base `_emit` optionally append to a base-level trajectory list. Then
+`Dace` consumes a *documented* attribute and any optimizer can opt in.
 
-**Proposal.** Add a `Problem.has_grad` flag (or a single counted helper on the `Optimizer` base)
-so gradient support is detected once, cheaply, and consistently; count relocation/detection probes
-in `n_evals` (or document them as deliberately excluded); move Adam's gradient precondition to
-`_setup`. None changes search results — only honesty of `n_evals` and where the error surfaces.
+**Files.** `src/pysurrogate/core/optimizer.py`, `src/pysurrogate/optimizer/boxmin.py`,
+`src/pysurrogate/dace/dace.py`.
 
----
+**Verify.** `pyclawd golden` (trajectory feeds golden theta-trajectory snapshots — must stay
+identical); `pyclawd check`; `pyclawd test -k "optimizer or boxmin"`.
 
-## 8. [L] Bounds-extraction boilerplate duplicated across four optimizers
-
-**Where:** `optimizer/{lbfgs,adam,pattern,restart}.py`.
-
-`lo, hi = (np.atleast_1d(np.asarray(b, float)) for b in self.problem.bounds)` and the parallel
-`sampling_bounds` unpack are copy-pasted verbatim in four optimizers. **Proposal:** a small
-`Optimizer._box()` helper returning `(lo, hi, slo, shi)` as float arrays, called from each
-`_setup`. Pure dedup, easy win — left out of the applied pass only to avoid touching all four
-optimizers without your sign-off.
+**Done when.** `visited` is contractual; the `Dace` `getattr` reach-in is gone; golden 19/19.
 
 ---
 
-## 9. [L] `KNN` and `IDW` give the same name `p` two different meanings
+### Task 8 — `Partitioning`: local RNG instead of reseeding globals  ·  [M] · **changes reproducible fold assignments**
 
-**Where:** `models/knn.py` vs `models/idw.py`.
+**Why.** `core/partitioning.py` `do()` calls `random.seed(self.seed)` + `np.random.seed(self.seed)`
+and the subclasses use the module-global `random.shuffle` / `np.random.permutation`. This perturbs
+any other code relying on global RNG state, and concurrent partitionings interfere. `core/sampling.py`
+does the right thing with a threaded `Generator`.
 
-Both expose a power parameter `p`, but `IDW` weights `1/D**p` over the **true** Euclidean distance
-(`euclidean_dist`, default `p=3`), while `KNN` raises **squared** distance (`calc_dist`) to `**p`
-(default `p=2`) — so KNN's effective exponent on true distance is `2p`, and its
-"inverse-distance-weighting" docstring is really inverse-*squared*-distance. The identically named
-knob means different things between two sibling models.
+**Do.** Switch to a local `np.random.default_rng(self.seed)` (and a local `random.Random(self.seed)`
+if Python-`random` shuffling is kept), threaded through `_folds`.
 
-**Proposal.** Make the distance basis consistent (use `euclidean_dist` in KNN, or rename/document
-the exponent). At minimum, correct the KNN docstring to say it weights by squared distance.
+**Important caveat.** `default_rng(seed).permutation` produces a *different* sequence than
+`np.random.seed(seed); np.random.permutation`, so **fold assignments shift**. Any test or golden that
+pins CV outputs will change. This is a deliberate reproducibility change → run the gate, and if golden
+moves, **stop and ask the user to bless** the new baselines (do not self-bless).
 
----
+**Files.** `src/pysurrogate/core/partitioning.py`.
 
-## 10. [L] RBF kernel library has three sharp edges
+**Verify.** `pyclawd check`; `pyclawd golden`. Expect possible golden/test movement → escalate, don't
+auto-update.
 
-> Note: `RBF` is a temporary implementation slated for retirement or a rebuild on the shared
-> `core/kernel.py` (★B). If it is removed, these are moot; if it is rebuilt, they are fixed for free
-> while defining the unified kernel zoo. Listed here for completeness.
-
-
-**Where:** `models/rbf.py`.
-
-- **`kernel_gaussian` is a quartic, not a Gaussian.** Kernels receive `r = calc_dist(...)` = the
-  *squared* distance `D`. `kernel_gaussian` computes `exp(-sigma * r**2) = exp(-sigma * ||x-xi||**4)`.
-  A Gaussian in the squared-distance argument is `exp(-sigma * r)`. The gradient is internally
-  consistent with the quartic, and `tps` is the default so golden doesn't exercise it — but the
-  `'gaussian'` label is mathematically wrong. **Proposal:** either use `exp(-sigma * r)` (and update
-  `dkernel_gaussian`) or rename the kernel to reflect what it is.
-- **`kernel_periodic` hard-codes period 5** as a bare literal (and again in `dkernel_periodic`),
-  unconfigurable, with `r` being squared distance so the geometric meaning is unclear. **Proposal:**
-  expose the period as a named kwarg with a documented default.
-- **`kernel_gaussian(sigma=None)`** default would raise on a bare call; it only works because the
-  RBF model always passes `sigma`. **Proposal:** give it a real default.
-
-These are semantic/numeric decisions, so they belong here rather than in the mechanical pass — and
-they are naturally resolved while rewriting the kernels into the shared `core/kernel.py`
-(★ section): a correct `Gaussian`, a `period`-parametrized periodic kernel, and real defaults all
-land as part of defining the unified kernel zoo once.
+**Done when.** No global RNG reseed; the gate is green (after a human blesses any intended drift).
 
 ---
 
-## 11. [L] Decide the fate of `Dace._val_error` and `Correlation.has_theta_grad`
+### Task 9 — Opportunistic cleanups  ·  [L] · low risk (bundle)
 
-**Where:** `dace/dace.py`, `dace/corr.py`.
+Small, independent polish. Do any subset; each is self-verifying with `pyclawd check` + `pyclawd
+golden`.
 
-- `Dace._val_error` is unused in production (held-out theta selection now flows through
-  `ValidationSelection.score`); it survives only because a test pins it. Its docstring was corrected
-  in this pass to stop claiming the optimizer uses it. **Decision:** keep it as a documented
-  standalone scorer, or delete it (and its test) and let `ValidationSelection` own the formula
-  outright. There is a third copy of the normalized-prediction formula (`predict` /
-  `_val_error` / `ValidationSelection.score`) worth factoring into one helper.
-- `Correlation.has_theta_grad` has no consumer in `src` (only a test). `DaceProblem` always calls
-  `kernel.theta_grad` unconditionally. **Decision:** either wire `DaceProblem`/`LBFGS` to consult it
-  and fall back to finite differences for kernels without an analytic theta-gradient, or remove the
-  property and its now-overstated docstring.
-
----
-
-## 12. [L] Inconsistent cross-validation defaults
-
-**Where:** `selection/benchmark.py` (`CrossvalidationPartitioning(k_folds=3, seed=1)`) vs
-`dace/dace.py` `calibrate` (`k_folds=5`).
-
-The same conceptual choice ("how many folds to estimate held-out performance") has two different
-defaults in one framework, so benchmark ranking and variance calibration disagree on what "default
-CV" means. **Proposal:** one shared default (a named constant or a default-partitioning factory)
-referenced by both.
-
----
-
-## Applied in this pass (already committed to the working tree, all gated green)
-
-These were safe enough to apply directly — each was verified by `pyclawd check` (format / lint /
-typecheck / descriptions / tests) **and** the 19 golden snapshots after every batch, so observable
-behavior is provably unchanged for the covered paths. New regression tests were added for the
-behavioral bug fixes.
-
-**Correctness bugs**
-- `SimpleMean` now returns `(m, q)` for multi-output targets (previously crashed for `q > 1`).
-- `Standardization.forward` guards a zero-std (constant) dimension instead of dividing into NaN/inf
-  (matches `ZeroToOneNormalization` and the Dace fit).
-- `Plog.forward`/`backward` allocate float output, so integer-typed targets are no longer truncated.
-- `Model.predict` on a failed fit uses the *promoted* row count (a 1-D query point is one row, not
-  `d`), and honors `raise_exception_while_prediction` (not the fitting flag) on the failed-fit path.
-- `Sampling.sample` returns shape `(0, p)` (not `(0,)`) on the empty edge case.
-- `Benchmark.results`/`frame` now rank **target-aware** (e.g. calibration metrics rank by distance
-  to their target), via a new shared `metrics.metric_sort_key` that `StudyResult.ranking` also uses —
-  so the two rankers agree. `results()` also raises a clear error if `sorted_by` isn't a computed
-  metric (was a `KeyError`).
-- `ModelSelection.fit`/`do` now forward `optimize` (was silently dropped, making the cheap-screen
-  path unreachable through the public API).
-- `RBF._fit` honors the fit-time `optimize` flag (gates the sigma grid on
-  `self.optimize and optimize`), matching Kriging — so `optimize=False` screening is cheap for RBF.
-- `Adam` masks infeasible candidates' gradients to zero before the step (the comment claimed this
-  but nothing enforced it; `LBFGS` already did).
-
-**Hygiene / consistency**
-- `Transformation` now inherits `ABC`, so its `@abstractmethod`s are actually enforced.
-- `kernel_tps` no longer mutates its input array (uses `np.where`, matching `dkernel_tps`).
-- Deleted dead `corr.calc_grad`; removed a no-op `super().__init__()` in `Dace`.
-- Corrected stale docstrings/comments: `theta_bounds=None` (unbounded search, not "freeze"),
-  `batch_obj_grad` (`noise='auto'` and `objective_gradient` are gone), `Dace._val_error`
-  (no longer used by the optimizer). Added the missing `fit()` docstring and one-line docstrings for
-  the RBF `kernel_*`/`dkernel_*` helpers.
-- Routed `is_duplicate` through `util.dist.euclidean_dist`; imported `predictions_frame` from its
-  home module; hoisted a per-fold `set()` out of an inner loop in `CrossvalidationPartitioning`.
+- **Optimizer accounting (`optimizer/{lbfgs,adam,boxmin}.py`):** `n_evals` undercounts
+  (`Boxmin._relocate` probes, `LBFGS`'s gradient-detection probe are uncounted). Add a
+  `Problem.has_grad` flag (or one counted helper on the `Optimizer` base) so gradient support is
+  detected once and consistently; count the probes in `n_evals` or document them as excluded; move
+  `Adam`'s "requires gradient" check from `_advance` to `_setup` (fail fast, like `requires_x0`).
+- **Bounds-extraction boilerplate (`optimizer/{lbfgs,adam,pattern,restart}.py`):** the
+  `lo, hi = (np.atleast_1d(np.asarray(b, float)) for b in self.problem.bounds)` + `sampling_bounds`
+  unpack is copy-pasted four times. Add `Optimizer._box() -> (lo, hi, slo, shi)` and call it.
+- **`KNN` vs `IDW` `p` (`models/knn.py`, `models/idw.py`):** same param name, different meaning —
+  `IDW` uses true distance `1/D**p` (default 3), `KNN` raises *squared* distance to `**p` (default 2),
+  so KNN's effective exponent on true distance is `2p`. Make the distance basis consistent or
+  rename/document; at minimum correct the KNN docstring (it weights by squared distance).
+- **RBF kernel correctness (`models/rbf.py`)** — *fold into Task 3 if RBF is rebuilt; skip if retired:*
+  `kernel_gaussian` computes `exp(-sigma*r**2) = exp(-sigma*||x||**4)` (a quartic, not a Gaussian; a
+  Gaussian over squared-distance `r` is `exp(-sigma*r)`); `kernel_periodic` hard-codes period `5` as a
+  bare literal (make it a named kwarg); `kernel_gaussian(sigma=None)` has no usable default.
+- **`Dace._val_error` / `Correlation.has_theta_grad` (`dace/dace.py`, `dace/corr.py`):** both are
+  unused in production (only pinned by tests). Decide per item: keep as a documented standalone
+  utility, or delete (and its test). There's a third copy of the normalized-prediction formula
+  (`predict` / `_val_error` / `ValidationSelection.score`) worth factoring into one helper.
+- **CV default mismatch:** `Benchmark.do` defaults `CrossvalidationPartitioning(k_folds=3, seed=1)`
+  while `Dace.calibrate` defaults `k_folds=5`. Share one default (a named constant / factory).
+- **`evaluate()` redundant guard (`selection/metrics.py`):** the default-`names` filter and the
+  in-loop `PROBABILISTIC and sigma is None: continue` encode the same intent twice with subtly
+  different consequences (explicit names silently drop probabilistic metrics when sigma is missing,
+  rather than erroring). Pick one point of truth.
 
 ---
 
-## Suggested order of attack
+## 5. Definition of done (per task and overall)
 
-1. **#4** (exports) — trivial, immediately improves discoverability of the optimizer layer.
-2. **★A** (`core/regression.py` basis) — low-risk, deletes 3→1 copies, golden stays green. The first
-   concrete unification step.
-3. **★B** (`core/kernel.py`, `ard` toggle) — medium-risk, golden-anchored; makes `RBF` and `Dace`
-   two configurations of one kernel family.
-4. **#1** (one benchmark engine) — biggest reduction in duplicated surface.
-5. **#2** (`Dace` ↔ `Model` API alignment) + **#3** (`AutoModel`: genuine `Model` + rename) — biggest
-   reduction in long-term user friction.
-6. **#5** (trajectory contract), **#6** (RNG) — clean up the optimizer/core seams.
-7. The **[L]** items as opportunistic polish (several fold into ★B automatically).
+- `pyclawd check` green (format-check, lint, typecheck, descriptions, tests).
+- `pyclawd golden` 19/19 — and any intended drift was **blessed by a human**, not self-updated.
+- `pyclawd doctor` exits 0.
+- Every behavior change has a regression test.
+- Public-API / default changes are called out to the user.
+- You did **not** commit or push unless the user asked.
+
+When in doubt, prefer the smaller change, keep golden green, and ask.
