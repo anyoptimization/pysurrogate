@@ -54,7 +54,7 @@ def test_dace_fits_and_predicts_with_matern():
     rng = np.random.default_rng(3)
     X = rng.random((22, 2))
     y = np.sum(np.sin(X * 3.0), axis=1)
-    model = Dace(regr=ConstantRegression(), corr=Matern(nu=2.5), theta=0.5, thetaL=1e-3, thetaU=20.0)
+    model = Dace(regr=ConstantRegression(), corr=Matern(nu=2.5), theta=0.5, theta_bounds=(1e-3, 20.0))
     model.fit(X, y)
     pred = model.predict(rng.random((5, 2))).y
     assert pred.shape == (5, 1)

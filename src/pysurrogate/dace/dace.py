@@ -2,11 +2,30 @@
 
 import numpy as np
 
+from pysurrogate.core.optimizer import Callback
+from pysurrogate.core.optimizer import Optimizer as GenericOptimizer
+from pysurrogate.core.partitioning import CrossvalidationPartitioning, Partitioning
 from pysurrogate.core.prediction import Prediction
+from pysurrogate.core.sampling import LHS, Sampling
 from pysurrogate.dace.corr import Gaussian, calc_kernel_matrix
 from pysurrogate.dace.fit import DaceFitError, fit
-from pysurrogate.dace.optimizers import ScreenedLBFGS
+from pysurrogate.dace.problem import DaceProblem
 from pysurrogate.dace.regr import ConstantRegression
+from pysurrogate.dace.selection import ValidationSelection
+from pysurrogate.optimizer import LBFGS, Restart
+
+# sentinel for the `optimizer` argument: distinguishes "caller said nothing -> use the
+# default optimizer" from an explicit ``optimizer=None``, which means "do not search -- freeze
+# theta and just fit at its current value". (None cannot itself be the default, since None is
+# the no-search request.)
+_DEFAULT_OPTIMIZER = object()
+
+
+def _default_optimizer():
+    # screen-and-polish over the generic layer: a Latin-hypercube screen (the warm theta
+    # competes as a forced sample) trimmed to the best few, each refined with L-BFGS. The
+    # generic replacement for the old ScreenedLBFGS default.
+    return Restart(LBFGS(), Sampling(16, LHS()), screen=4)
 
 
 class Dace:
@@ -15,11 +34,10 @@ class Dace:
         regr=None,
         corr=None,
         theta=1.0,
-        thetaL=0.0,
-        thetaU=100.0,
-        optimizer=None,
+        theta_bounds=(0.0, 100.0),
+        optimizer=_DEFAULT_OPTIMIZER,
         noise=0.0,
-        max_noise=1e-4,
+        noise_bounds=None,
     ):
         """Construct the model with the given regression and correlation types.
 
@@ -32,35 +50,33 @@ class Dace:
             corr: Correlation (kernel) instance, e.g. Gaussian(), Cubic(), Exponential(),
                 RationalQuadratic(alpha=...). Defaults to Gaussian().
             theta: Initial value of theta. Can be a vector or a float
-            thetaL: The lower bound if theta should be optimized.
-            thetaU: The upper bound if theta should be optimized.
-            optimizer: Strategy used to optimize theta when bounds are given (an instance of
-                pysurrogate.dace.optimizers.Optimizer). Defaults to ScreenedLBFGS() -- a fast
-                batched screen feeding a gradient polish (better surrogate than Boxmin, lower
-                cost). Boxmin() (the original MATLAB-Dace pattern search), LBFGS(),
-                VectorizedAdam() and Fixed() are the other built-ins.
+            theta_bounds: ``(lower, upper)`` box for the theta search, each a float or a
+                per-dimension vector. ``None`` makes the search *unbounded above* (theta stays
+                floored positive but has no ceiling) -- it does **not** freeze theta. To freeze
+                theta, pass ``optimizer=None``. Mirrors ``noise`` / ``noise_bounds`` -- the value
+                is the start, the bounds shape the search box.
+            optimizer: Strategy used to optimize theta when bounds are given. Unset (the
+                default) uses a generic ``Restart(LBFGS(), Sampling(16, LHS()), screen=4)`` --
+                a Latin-hypercube screen feeding a few analytic-gradient L-BFGS polishes (better
+                surrogate than Boxmin, lower cost) -- so a plain ``Dace()`` *optimizes* theta.
+                Pass any ``core.optimizer.Optimizer`` (``LBFGS``, ``PatternSearch``, ``Adam``,
+                ``Restart`` from ``pysurrogate.optimizer``), or ``Boxmin()`` for the legacy
+                MATLAB-Dace pattern search (the port-fidelity anchor). Pass ``optimizer=None``
+                to *disable* the search: theta is frozen at its value and only the GLS solve
+                runs (same effect as ``theta_bounds=None``).
             noise: Deliberate observation noise added to the diagonal of the correlation
                 matrix on every fit. Because that diagonal is unit, it is a noise-to-signal
                 ratio: noise=0.1 models 10% noise. 0.0 (default) interpolates the data;
-                noise>0 makes a regression GP that smooths through the points instead.
-                ``'auto'`` *learns* the nugget jointly with theta by marginal likelihood
-                (drives it to ~0 for a deterministic objective, to the right level for a
-                noisy one) -- the proper way to get calibrated predictive variance. Requires
-                theta bounds and an optimizer that supports it (the default ScreenedLBFGS).
-            max_noise: Extra auto-repair budget added *on top of* ``noise`` to make an otherwise-
-                infeasible committed fit possible. When the correlation matrix is not
-                positive-definite at ``noise``, a separate repair term climbs from a tiny
-                floor up to ``max_noise`` (smallest amount that works) and the total effective
-                diagonal is recorded in model["noise"], with a warning. Being independent of
-                ``noise`` means the budget works no matter how much deliberate noise was set.
-                The default ``1e-4`` auto-repairs tiny numerical non-positive-definiteness
-                (near-duplicate points, mild ill-conditioning) with negligible bias; genuine
-                conditional non-positive-definiteness (e.g. cubic at a bad theta) needs far
-                more and still raises. Set ``0.0`` for strict interpolation (raise on any
-                non-PD). The theta *search* never repairs -- a non-PD theta is simply
-                infeasible.
+                noise>0 makes a regression GP that smooths through the points instead. When
+                ``noise_bounds`` is given this is the *start* of the learned nugget instead of a
+                fixed value -- exactly as ``theta`` is the start when ``theta_bounds`` is given.
+            noise_bounds: ``(lower, upper)`` to *learn* the nugget jointly with theta (it becomes
+                one more coordinate of the search vector, with its own analytic gradient), or
+                ``None`` (default) to keep the nugget fixed at ``noise``. Mirrors
+                ``theta`` / ``theta_bounds``: the value is the start, the bounds enable the
+                search. Learning the nugget requires a search (an ``optimizer``) and the generic
+                optimizer layer (the legacy ``Boxmin`` cannot learn it).
         """
-        super().__init__()
         self.regr = regr if regr is not None else ConstantRegression()
         self.kernel = corr if corr is not None else Gaussian()
 
@@ -71,25 +87,45 @@ class Dace:
         # a vector theta reaches the kernel as an array and not a Python list)
         self.theta = np.array(theta) if type(theta) is list else theta
 
-        # lower and upper bound if it should be optimized
-        self.tl = np.array(thetaL) if type(thetaL) is list else thetaL
-        self.tu = np.array(thetaU) if type(thetaU) is list else thetaU
+        # lower and upper bound that shape the search box (theta_bounds=None -> unbounded above,
+        # NOT frozen; freezing is optimizer=None). Internal names stay tl/tu (the optimizers read them).
+        if theta_bounds is None:
+            self.tl, self.tu = None, None
+        else:
+            lo, hi = theta_bounds
+            self.tl = np.array(lo) if type(lo) is list else lo
+            self.tu = np.array(hi) if type(hi) is list else hi
 
-        # strategy that optimizes theta within the bounds (see pysurrogate.dace.optimizers). The
-        # default is ScreenedLBFGS -- a fast batched screen + gradient polish that reaches a
-        # better surrogate than the original Boxmin pattern search at lower cost. Pass
-        # Boxmin() for an exact MATLAB-Dace trajectory.
-        self.optimizer = optimizer if optimizer is not None else ScreenedLBFGS()
+        # strategy that optimizes theta within the bounds. Unset -> a generic screen-and-polish
+        # (Restart(LBFGS(), Sampling(16, LHS()), screen=4)) that reaches a better surrogate than
+        # the original Boxmin pattern search at lower cost, so a plain Dace() optimizes. An
+        # explicit optimizer=None means "do not search" (freeze theta), distinct from the unset
+        # default -- the sentinel keeps the two apart. Pass Boxmin() for an exact MATLAB-Dace
+        # trajectory.
+        self.optimizer = _default_optimizer() if optimizer is _DEFAULT_OPTIMIZER else optimizer
 
-        # diagonal noise-to-signal terms: `noise` is deliberate (always added; >0 -> a
-        # regression GP), `max_noise` is the ceiling the noise is climbed to when a fit
-        # is otherwise infeasible. Both 0.0 -> strict interpolation, raise on non-PD.
+        # deliberate diagonal noise-to-signal term, always added on every fit (>0 -> a
+        # regression GP that smooths through points). 0.0 -> strict interpolation. There is
+        # no auto-repair climb: a non-PD fit raises, fix it by raising noise / noise_bounds.
+        # When noise_bounds is given, `noise` is the START of the learned nugget instead.
         self.noise = noise
-        self.max_noise = max_noise
+
+        # lower/upper bound if the nugget should be LEARNED (noise_bounds=None -> fixed at
+        # `noise`). Mirrors tl/tu for theta: the value is the start, the bounds enable the
+        # search. Internal names nl/nu match the tl/tu convention.
+        if noise_bounds is None:
+            self.nl, self.nu = None, None
+        else:
+            self.nl, self.nu = noise_bounds
 
         # record of the hyperparameter optimization (search trajectory + diagnostics),
         # populated by the optimizer on fit; None until then / for a fixed theta.
         self.optimization = None
+
+        # scalar multiplier on the predictive variance, set only by the standalone calibrate()
+        # via cross-validation. 1.0 is the identity (uncalibrated): fit never calibrates, so
+        # predict returns the raw kriging variance until calibrate() is called explicitly.
+        self.scale = 1.0
 
     def fit(self, X, Y, validation=None, append=True):
         """Fit the model, optionally selecting theta on a held-out subset of the rows.
@@ -117,6 +153,10 @@ class Dace:
         if X.shape[0] != Y.shape[0]:
             raise Exception("X and Y must have the same number of rows.")
 
+        # a fresh fit invalidates any prior variance calibration -- reset to the identity so a
+        # stale scale never leaks onto a new model; recalibrate against held-out data if wanted.
+        self.scale = 1.0
+
         # save the mean and standard deviation of the input. Stats are over all rows,
         # so the held-out validation rows share the training normalization -- selection
         # then scores in this one normalized space (no destandardization, scale-free).
@@ -136,84 +176,46 @@ class Dace:
         nY = (Y - mY) / sY
 
         stats = {"mX": mX, "sX": sX, "mY": mY, "sY": sY}
-        optimize_theta = self.tl is not None and self.tu is not None
+        # whether to search is decided by the OPTIMIZER, not the bounds: optimizer=None means
+        # "freeze theta" (no search), an optimizer present means search. The bounds only shape the
+        # box -- None bounds make the search unbounded (the generic layer seeds from a finite
+        # window and descends without a ceiling), they no longer mean "don't search".
+        optimize_theta = self.optimizer is not None
 
-        # noise='auto' learns the nugget jointly with theta inside the search, so it needs a
-        # theta-optimization (bounds) and an optimizer that supports it (e.g. ScreenedLBFGS).
-        auto_noise = isinstance(self.noise, str) and self.noise == "auto"
-        if auto_noise:
-            if not optimize_theta:
-                raise Exception("noise='auto' requires theta bounds -- the nugget is learned jointly with theta.")
-            if not getattr(self.optimizer, "supports_auto_noise", False):
-                raise Exception(
-                    f"noise='auto' is not supported by {type(self.optimizer).__name__}; "
-                    "use ScreenedLBFGS (the default) or pass a numeric noise."
-                )
+        # the nugget is LEARNED exactly when noise_bounds was given (nl/nu set) -- mirrors
+        # optimize_theta. Learning it needs a search (an optimizer).
+        optimize_noise = self.nl is not None and self.nu is not None
 
-        if optimize_theta and validation is not None:
-            # held-out theta selection: train candidates on the 0-rows and score them on
-            # the held-out rows. The optimizer still searches by likelihood; only its
-            # final pick uses the held-out set (passed already normalized, see
-            # _val_error). dace.model["nX"] is the training split during the search.
-            mask = np.asarray(validation, dtype=bool)
-            if mask.shape[0] != X.shape[0]:
-                raise Exception("validation mask must have one entry per row of X.")
-            n_held = int(mask.sum())
-            if n_held == 0 or n_held == mask.shape[0]:
-                raise Exception(
-                    f"validation mask must hold out some rows but not all (got {n_held} of {mask.shape[0]})."
-                )
-            train = ~mask
-            self.model = {"nX": nX[train], "nY": nY[train], **stats}
-            selected, self.optimization = self.optimizer.optimize(self, validation=(nX[mask], nY[mask]))
+        # every optimizer is a generic core.optimizer.Optimizer now (the legacy DACE-specific
+        # optimizer package is gone) -- guard against anything else with a clear message.
+        if optimize_theta and not isinstance(self.optimizer, GenericOptimizer):
+            raise Exception(
+                f"{type(self.optimizer).__name__} is not a core.optimizer.Optimizer -- pass a generic "
+                "optimizer (LBFGS, PatternSearch, Boxmin, ...) or optimizer=None to freeze theta."
+            )
+        if optimize_noise and not optimize_theta:
+            raise Exception("noise_bounds requires an optimizer -- the nugget is learned jointly with theta.")
 
-            if append:
-                # theta is chosen -> refit the final model on ALL rows so predict uses
-                # every label (honoring the noise / max_noise policy, like any committed fit).
-                # The theta was positive-definite on the training rows; re-adding the
-                # held-out rows can in principle break that, so surface a clear,
-                # actionable error instead of a bare Cholesky failure. self.optimization
-                # keeps the train-only search trajectory for inspection.
-                # with noise='auto' the optimizer learned the nugget; commit the final fit at
-                # that learned value (selected["noise"]) rather than the literal string 'auto'.
-                committed_noise = selected.get("noise", 0.0) if auto_noise else self.noise
-                try:
-                    self.model = fit(
-                        nX,
-                        nY,
-                        self.regr,
-                        self.kernel,
-                        selected["theta"],
-                        noise=committed_noise,
-                        max_noise=self.max_noise,
-                    )
-                except DaceFitError as e:
-                    raise DaceFitError(
-                        "The validation-selected theta is not positive-definite once the held-out rows "
-                        "rejoin the model (append=True). Raise max_noise to regularize the final fit, "
-                        "or pass append=False to keep the train-only model."
-                    ) from e
-                Xf, Yf, nXf, nYf = X, Y, nX, nY
-            else:
-                # keep the train-only model; it never saw the held-out rows
-                self.model = selected
+        if optimize_theta:
+            # optimize over a DaceProblem; selection is a Callback (held-out when a validation mask
+            # is given, maximum-likelihood otherwise). The nugget is a learned coordinate when
+            # noise_bounds was set. An unbounded box (theta_bounds=None) is an unbounded search.
+            theta, noise, self.optimization, train = self._optimize_generic(nX, nY, validation)
+            if validation is not None and not append:
                 Xf, Yf, nXf, nYf = X[train], Y[train], nX[train], nY[train]
-
-        elif optimize_theta:
-            self.model = {"nX": nX, "nY": nY, **stats}
-            self.model, self.optimization = self.optimizer.optimize(self)
-            Xf, Yf, nXf, nYf = X, Y, nX, nY
+            else:
+                Xf, Yf, nXf, nYf = X, Y, nX, nY
+            try:
+                self.model = fit(nXf, nYf, self.regr, self.kernel, theta, noise=noise)
+            except DaceFitError as e:
+                raise DaceFitError(
+                    "No positive-definite correlation matrix for the selected theta at the requested "
+                    "noise; set noise / noise_bounds to regularize the committed fit."
+                ) from e
 
         else:
-            self.model = fit(
-                nX,
-                nY,
-                self.regr,
-                self.kernel,
-                self.theta,
-                noise=self.noise,
-                max_noise=self.max_noise,
-            )
+            # optimizer=None -> freeze theta: a single GLS solve at the current theta and noise.
+            self.model = fit(nX, nY, self.regr, self.kernel, self.theta, noise=self.noise)
             self.optimization = None
             Xf, Yf, nXf, nYf = X, Y, nX, nY
 
@@ -221,41 +223,106 @@ class Dace:
         self.model = {**self.model, "X": Xf, "Y": Yf, **stats, "nX": nXf, "nY": nYf}
         self.model["sigma2"] = np.square(sY) @ self.model["_sigma2"]
 
-    def refit(self, X, Y, optimizer=None, validation=True):
-        """Append new observations to the training data and re-fit, warm-started.
+    def _theta_bounds_for_problem(self):
+        """Theta ``(lo, hi)`` for the DaceProblem -- the finite bounds, or an unbounded box.
 
-        Takes only the *new* points, appends them to the data the model was last
-        fit on, and re-fits on the combined set. Theta is seeded from the previous
-        fit (warm start), so the search begins next to the optimum instead of at
-        the original initial guess -- the optimum barely moves when a few points
-        are added, which is exactly when a local optimizer shines. The new points
-        are always appended to the model (that is what refit means); ``validation``
-        only controls whether they also *steer* the theta search.
+        With ``theta_bounds=None`` (tl/tu None) the search is unbounded: keep the length-scale
+        positive (floored) but put no ceiling on it (``+inf``). The number of coordinates ``p``
+        then comes from the start ``self.theta`` -- a scalar is isotropic (``p=1``), a vector is
+        ARD -- since there are no bounds to read it from.
+        """
+        if self.tl is not None and self.tu is not None:
+            return (self.tl, self.tu)
+        p = len(np.atleast_1d(np.asarray(self.theta, dtype=float)))
+        return (np.full(p, 1e-12), np.full(p, np.inf))
 
-        The defaults make refit cheap and self-tuning: a warm-started ``ScreenedLBFGS()``
-        (a cheap batched screen -- in which the previous optimum competes as a seeded
-        candidate -- feeding a single analytic-gradient polish) and the new points as the
-        held-out set -- so each refit nudges theta toward whatever best predicts the freshly
-        added points, exactly what an online/surrogate loop wants. The screen makes the warm
-        refit robust to the optimum having shifted (e.g. after a batch of new points) without
-        giving up the warm start, and the held-out selection is the regularizer against
-        over-fitting theta on the appended data.
+    def _optimize_generic(self, nX, nY, validation):
+        """Run a generic optimizer over a DaceProblem; return ``(theta, noise, record, train_mask)``.
+
+        With a validation mask the candidates train on the unmasked rows and are selected by
+        held-out error (:class:`ValidationSelection`); otherwise the whole set trains and selection
+        is maximum likelihood. With ``noise_bounds`` the nugget is a learned coordinate.
+        """
+        # noise_bounds set (nl/nu) -> learn the nugget; else fix it at self.noise. Mirrors theta.
+        noise_kw = {"noise_bounds": (self.nl, self.nu)} if self.nl is not None else {"noise": self.noise}
+        theta_bounds = self._theta_bounds_for_problem()
+
+        if validation is not None:
+            mask = np.asarray(validation, dtype=bool)
+            if mask.shape[0] != nX.shape[0]:
+                raise Exception("validation mask must have one entry per row of X.")
+            n_held = int(mask.sum())
+            if n_held == 0 or n_held == mask.shape[0]:
+                raise Exception(
+                    f"validation mask must hold out some rows but not all (got {n_held} of {mask.shape[0]})."
+                )
+            train = ~mask
+            problem = DaceProblem(nX[train], nY[train], self.regr, self.kernel, theta_bounds, **noise_kw)
+            callback = ValidationSelection(problem, nX[mask], nY[mask])
+        else:
+            train = np.ones(nX.shape[0], dtype=bool)
+            problem = DaceProblem(nX, nY, self.regr, self.kernel, theta_bounds, **noise_kw)
+            callback = Callback()
+
+        x0 = self._encode_start(problem)
+        res = self.optimizer.setup(problem, x0=x0, callback=callback).run()
+        # no PD candidate at the search noise -> fall back to the start theta; the committing
+        # fit() then either succeeds there or raises (no hidden repair climb). Fix a persistent
+        # failure by setting noise / noise_bounds, not silently.
+        x_best = res.x if res.x is not None else x0
+        theta, noise = problem.decode(x_best)
+        record = {
+            "theta": theta,
+            "noise": noise,
+            "x": x_best,
+            "f": res.f,
+            "message": res.message,
+            "n_evals": res.n_evals,
+        }
+        # expose the visited theta trajectory when the optimizer records one (pattern searches do):
+        # decode each visited point back to theta space, mirroring the old optimization["models"].
+        visited = getattr(self.optimizer, "visited", None)
+        if visited is not None:
+            record["models"] = [{"theta": problem.decode(x)[0]} for x in visited]
+        return theta, noise, record, train
+
+    def _encode_start(self, problem):
+        """Encode the warm start ``self.theta`` (+ the nugget start ``self.noise`` when learned) as a log10 x0."""
+        theta0 = np.broadcast_to(np.atleast_1d(np.asarray(self.theta, dtype=float)), (problem.p,))
+        x0 = np.log10(np.maximum(theta0, 1e-12))
+        if problem.learn_noise:
+            # self.noise is the START of the learned nugget; clamp it into the noise bounds (a
+            # 0.0 start lands on the lower bound) so its log10 is finite and inside the box.
+            noise0 = np.clip(float(self.noise), problem._nlo, problem._nhi)
+            x0 = np.append(x0, np.log10(noise0))
+        return x0
+
+    def refit(self, X, Y, optimize=True, validation=True):
+        """Append new observations to the training data and re-fit, reusing the fitted theta.
+
+        Takes only the *new* points, appends them to the data the model was last fit on, and
+        re-fits on the combined set. Theta is always **seeded from the previous fit** (it barely
+        moves when a few points are added); ``optimize`` then decides what happens from there:
+
+        - ``optimize=True`` (default) -- **warm-start the model's optimizer** from the previous
+          optimum (``self.optimizer`` -- the same method configured for the cold fit, now seeded at
+          the reused theta), so theta adapts to the grown data at low cost.
+        - ``optimize=False`` -- **freeze theta** at its previous value and just re-solve the kernel
+          matrix on the grown data (a single GLS solve, no search). Cheapest, and it keeps theta
+          from drifting on biased/adaptively-sampled data.
+
+        The new points are always appended (that is what refit means); ``validation`` only steers
+        the *search* (so it is moot when ``optimize=False``).
 
         Args:
             X: The new input points to add (only the additions, not the full set).
             Y: The target values corresponding to the new points ``X``.
-            optimizer: Strategy to use for this refit only. ``None`` (default) uses
-                ``ScreenedLBFGS()`` -- a fast, warm-started screen-and-polish refine, the
-                natural choice for a refit since the previous optimum competes in the screen
-                and a single gradient polish refines it. Pass ``Boxmin()`` for a global
-                re-search, ``LBFGS()`` for a plain warm gradient refine, or ``Fixed()`` to
-                freeze theta and just re-solve. Has no effect when the model was built without
-                theta bounds. Requires a prior successful ``fit``.
-            validation: Whether the *new* points are held out to select theta. ``True`` (default)
-                makes the new points the validation set (the existing data is the training
-                set), so theta is chosen by how well the old data predicts the new points --
-                a generalization-driven update. ``False`` re-fits by likelihood over all
-                data. Either way the new points are appended (refit always appends).
+            optimize: ``True`` warm-starts the theta search from the previous fit; ``False`` keeps
+                theta fixed and only re-solves the kernel matrix on the grown data.
+            validation: When ``optimize`` is ``True``, whether the *new* points are held out to
+                select theta. ``True`` (default) makes the new points the validation set so theta
+                is chosen by how well the old data predicts them; ``False`` re-fits by likelihood
+                over all data. Ignored when ``optimize=False``.
 
         Raises:
             Exception: If called before any successful ``fit``.
@@ -272,20 +339,22 @@ class Dace:
         X = np.vstack([self.model["X"], X])
         Y = np.vstack([self.model["Y"], Y])
 
-        # warm start: seed the search with the previously optimized theta
+        # reuse the previously optimized theta -- the warm start (optimize=True) or the frozen
+        # value (optimize=False)
         self.theta = self.model["theta"]
 
-        # if requested, the appended rows are the held-out set that selects theta
+        # the appended rows steer theta only when we actually search
         mask = None
-        if validation:
+        if validation and optimize:
             mask = np.zeros(X.shape[0], dtype=bool)
             mask[n_old:] = True
 
-        # per-refit optimizer, restored afterwards. Default is a warm-started ScreenedLBFGS
-        # -- a cheap batched screen (the previous optimum competes in it) plus one gradient
-        # polish -- not the model's configured optimizer, which is meant for the cold fit.
+        # optimize gates WHETHER we search; the optimizer (the method) is the model's own
+        # self.optimizer, now warm-started from the reused theta. optimize=False freezes theta
+        # (no search), re-solving the kernel matrix only. The configured optimizer is restored
+        # afterwards either way.
         configured = self.optimizer
-        self.optimizer = optimizer or ScreenedLBFGS()
+        self.optimizer = configured if optimize else None
         try:
             self.fit(X, Y, validation=mask)
         finally:
@@ -294,8 +363,10 @@ class Dace:
     def _val_error(self, model, nXv, nYv):
         """Root-mean-square error of a candidate fit on the held-out rows.
 
-        Used by an optimizer to select theta when a validation mask is given. The
-        candidate was fit on the training rows; here it predicts the held-out rows and
+        A standalone scoring helper kept for tests and ad-hoc use; the production theta search
+        now scores held-out candidates through :class:`~pysurrogate.dace.selection.ValidationSelection`
+        (the optimizer's selection ``Callback``), which applies the same normalized-space formula.
+        The candidate was fit on the training rows; here it predicts the held-out rows and
         the error is measured in *normalized* space. The held-out inputs and targets
         arrive already standardized with the training stats (the mask is applied to the
         same ``nX`` / ``nY`` the candidate trained on), so there is nothing to
@@ -379,6 +450,10 @@ class Dace:
             # region). Clamp at 0 so downstream sqrt(mse) (std, EI) never returns NaN.
             _mse_clamped = (_mse < 0.0).ravel()
             _mse = np.maximum(_mse, 0.0)
+            # apply the validation-fitted variance scale (1.0 = uncalibrated identity). Baked
+            # into the returned variance so sigma = sqrt(var) and every downstream metric is
+            # calibrated without knowing about the scale; the gradient below scales identically.
+            _mse = self.scale * _mse
 
         # mse_grad is available alongside both the variance and the mean gradient, since
         # it reuses their terms (rt, v, Ginv and the batched dR/dF). sigma2 is already
@@ -416,5 +491,88 @@ class Dace:
                 _mse_grad = self.model["sigma2"] * d_bracket / sX  # (m, d)
                 # where the variance was clamped to 0 the clamped surface is flat -> 0 grad
                 _mse_grad[_mse_clamped] = 0.0
+                _mse_grad = self.scale * _mse_grad  # same scale as the variance it differentiates
 
         return Prediction(y=_Y, var=_mse, grad=_grad, var_grad=_mse_grad)
+
+    def calibrate(self, partitioning=None):
+        """Fit a scalar variance multiplier by cross-validation so the intervals are calibrated.
+
+        The kriging variance is systematically too small (overconfident) by a roughly constant
+        factor; this corrects it with the one scalar ``s = mean[(y - yhat)**2 / var]`` -- the
+        maximum-likelihood scale that drives the calibration ratio to 1. Only the predictive
+        *variance* is rescaled (``var -> s * var``); the mean predictions are untouched, so accuracy
+        metrics do not change. A later :meth:`fit` resets the scale back to the identity.
+
+        The ``(yhat, var)`` pairs are gathered **out-of-sample**: each split re-fits at the model's
+        already-chosen theta/noise (``optimizer=None``, no re-search) and predicts its held-out
+        rows, so reusing :meth:`predict` keeps the fold variance identical in form to the deployed
+        model's. With cross-validation every training row contributes one out-of-fold ratio, no
+        separate validation set to spend -- so the scale pools all ``n`` rows and stays usable even
+        on small designs. k-fold is the default rather than leave-one-out: LOO leaves the fit almost
+        unchanged, so its errors look too small and the scale comes out optimistic; k-fold's larger
+        holdouts are more honestly out-of-sample (and ``k`` re-fits).
+
+        Args:
+            partitioning: How to form the held-out splits. ``None`` (default) uses 5-fold
+                cross-validation. Pass a :class:`~pysurrogate.core.partitioning.Partitioning`
+                (e.g. ``RandomPartitioning`` for repeated hold-out, a higher ``k_folds`` for
+                LOO-like behavior), or a **boolean mask** over the training rows -- a single split
+                whose ``True`` rows are the held-out validation block and the rest are re-fit
+                (mirrors ``fit``'s ``validation`` mask).
+
+        Returns:
+            The fitted scale ``s`` (also stored on ``self.scale``); ``> 1`` means the model was
+            overconfident, ``< 1`` underconfident.
+
+        Raises:
+            Exception: If called before a successful :meth:`fit`.
+            ValueError: If a mask is malformed (wrong length, or holds out all / none of the rows).
+        """
+        if self.model is None:
+            raise Exception("calibrate() requires a prior fit(); call fit() first.")
+        X, Y = self.model["X"], self.model["Y"]  # the original (un-normalized) training data
+
+        # each split is a standalone model at the FIXED theta/noise (optimizer=None -> no search),
+        # so its prediction on the held-out rows is genuinely out-of-sample.
+        ratios = []
+        for train, test in self._calibration_splits(partitioning, X):
+            sub = Dace(
+                regr=self.regr, corr=self.kernel, theta=self.model["theta"], noise=self.model["noise"], optimizer=None
+            )
+            sub.fit(X[train], Y[train])
+            pred = sub.predict(X[test], mse=True)
+            resid2 = np.square(Y[test] - pred.y)  # (m, q): per-output squared error
+            var = np.maximum(pred.var, 1e-300)  # (m, 1): shared across outputs, guard /0
+            ratios.append((resid2 / var).ravel())
+
+        # the scale that makes the pooled out-of-fold calibration ratio exactly 1
+        self.scale = float(np.mean(np.concatenate(ratios)))
+        return self.scale
+
+    def _calibration_splits(self, partitioning, X):
+        """Resolve the ``calibrate`` argument into a list of ``(train_idx, test_idx)`` pairs.
+
+        Args:
+            partitioning: ``None`` (default 5-fold CV), a ``Partitioning``, or a boolean mask over
+                the training rows (a single held-out split).
+            X: The training inputs, used for the row count and to drive the partitioning.
+
+        Returns:
+            A list of ``(train_idx, test_idx)`` integer-index pairs.
+        """
+        if partitioning is None:
+            partitioning = CrossvalidationPartitioning(k_folds=5)
+        if isinstance(partitioning, Partitioning):
+            return [(s.train, s.test) for s in partitioning.do(X)]
+
+        # otherwise a boolean mask: True rows are the held-out validation block (like fit's mask)
+        mask = np.asarray(partitioning, dtype=bool).ravel()
+        if mask.shape[0] != X.shape[0]:
+            raise ValueError(
+                f"calibration mask must have one entry per training row (got {mask.shape[0]} for {X.shape[0]})."
+            )
+        held = int(mask.sum())
+        if held == 0 or held == mask.shape[0]:
+            raise ValueError(f"calibration mask must hold out some rows but not all (got {held} of {mask.shape[0]}).")
+        return [(np.flatnonzero(~mask), np.flatnonzero(mask))]

@@ -81,7 +81,11 @@ class CrossvalidationPartitioning(Partitioning):
         for k in range(n):
             tst[k % k_folds].append(indices[k])
 
-        return [([j for j in indices if j not in set(fold)], fold) for fold in tst]
+        folds = []
+        for fold in tst:
+            held = set(fold)
+            folds.append(([j for j in indices if j not in held], fold))
+        return folds
 
 
 class RandomPartitioning(Partitioning):

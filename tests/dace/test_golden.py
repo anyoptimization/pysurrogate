@@ -23,8 +23,8 @@ from pysurrogate.dace.corr import (
     Spline,
 )
 from pysurrogate.dace.dace import Dace
-from pysurrogate.dace.optimizers import Boxmin
 from pysurrogate.dace.regr import ConstantRegression, LinearRegression, QuadraticRegression
+from pysurrogate.optimizer import Boxmin
 
 
 def _data():
@@ -37,13 +37,20 @@ def _data():
     return x_train, f_train, x_test
 
 
-# scalar-theta optimization bounds and ARD (vector) bounds reused across cases
-_OPT = dict(theta=0.5, thetaL=0.05, thetaU=10.0)
-_NOOPT = dict(theta=0.5, thetaL=None, thetaU=None)
-_ARD = dict(theta=np.array([0.5, 0.5]), thetaL=np.array([0.05, 0.05]), thetaU=np.array([10.0, 10.0]))
+# scalar-theta optimization bounds and ARD (vector) bounds reused across cases. The
+# optimization-path cases pin Boxmin (these baselines snapshot its pattern-search trajectory);
+# the fixed-theta cases pin optimizer=None (no search -- the meaning of "noopt" now lives on the
+# optimizer, not on theta_bounds=None, which would otherwise mean an unbounded search).
+_OPT = dict(theta=0.5, theta_bounds=(0.05, 10.0), optimizer=Boxmin())
+_NOOPT = dict(theta=0.5, optimizer=None)
+_ARD = dict(
+    theta=np.array([0.5, 0.5]), theta_bounds=(np.array([0.05, 0.05]), np.array([10.0, 10.0])), optimizer=Boxmin()
+)
 # expg's theta is (length-scale, power); both forms below keep it well-conditioned
-_EXPG = dict(theta=np.array([0.5, 2.0]), thetaL=None, thetaU=None)
-_EXPG_OPT = dict(theta=np.array([0.5, 2.0]), thetaL=np.array([0.05, 1.0]), thetaU=np.array([10.0, 3.0]))
+_EXPG = dict(theta=np.array([0.5, 2.0]), optimizer=None)
+_EXPG_OPT = dict(
+    theta=np.array([0.5, 2.0]), theta_bounds=(np.array([0.05, 1.0]), np.array([10.0, 3.0])), optimizer=Boxmin()
+)
 
 # (id, regr, corr, params) — chosen to cover every kernel x regression x path x theta-form
 CASES = [
@@ -75,10 +82,9 @@ CASES = [
 @pytest.mark.parametrize("name,regr,corr,params", CASES, ids=[c[0] for c in CASES])
 def test_predict(name, regr, corr, params):
     x_train, f_train, x_test = _data()
-    # pin Boxmin: these baselines snapshot the pattern-search trajectory (theta_traj) and its
-    # fitted theta, so the optimization-path cases must use that exact optimizer, not the
-    # library default (now ScreenedLBFGS). Harmless on the fixed-theta cases (no search).
-    model = Dace(regr=regr, corr=corr, optimizer=Boxmin(), **params)
+    # the optimizer is part of each case's params (Boxmin for the optimization-path baselines,
+    # None for the fixed-theta ones) -- see _OPT/_NOOPT above.
+    model = Dace(regr=regr, corr=corr, **params)
     model.fit(x_train, f_train)
 
     p = model.predict(x_test, mse=True, grad=True)

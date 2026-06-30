@@ -8,16 +8,14 @@ from pysurrogate.dace.regr import ConstantRegression
 
 
 def _fixed(noise=0.0, theta=20.0):
-    # fixed theta (no search) so the tests isolate the noise term from theta optimization;
-    # max_noise=0 keeps it strict, so a clean interpolation is genuine, not auto-repaired.
+    # fixed theta (optimizer=None -> no search) so the tests isolate the noise term from theta
+    # optimization. There is no auto-repair, so a clean interpolation is genuine.
     return Dace(
         regr=ConstantRegression(),
         corr=Gaussian(),
         theta=theta,
-        thetaL=None,
-        thetaU=None,
+        optimizer=None,
         noise=noise,
-        max_noise=0.0,
     )
 
 
@@ -62,7 +60,7 @@ def test_noise_present_during_the_theta_search():
     X = rng.random((22, 2))
     y = np.sum(np.sin(X * 3.0), axis=1) + 0.1 * rng.standard_normal(22)
 
-    m = Dace(regr=ConstantRegression(), corr=Gaussian(), theta=1.0, thetaL=1e-3, thetaU=50.0, noise=0.05)
+    m = Dace(regr=ConstantRegression(), corr=Gaussian(), theta=1.0, theta_bounds=(1e-3, 50.0), noise=0.05)
     m.fit(X, y)
 
     theta = np.ravel(m.model["theta"])

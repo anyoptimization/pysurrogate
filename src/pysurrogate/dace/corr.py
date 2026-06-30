@@ -10,11 +10,6 @@ def calc_kernel_matrix(A, B, func, theta):
     return np.reshape(K, (A.shape[0], B.shape[0]))
 
 
-def calc_grad(A, B, func, theta):
-    D = np.repeat(A, B.shape[0], axis=0) - np.tile(B, (A.shape[0], 1))
-    return func(D, theta)
-
-
 def calc_kernel_tensor(A, B, kernel, thetas):
     """Correlation matrices for a whole population of theta at once.
 

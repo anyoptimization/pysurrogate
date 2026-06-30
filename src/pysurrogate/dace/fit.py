@@ -1,7 +1,5 @@
 """Generalized least-squares fit of the Dace Kriging model for a fixed theta."""
 
-import warnings
-
 import numpy as np
 from numpy.linalg import LinAlgError
 
@@ -18,8 +16,29 @@ class DaceFitError(Exception):
     """
 
 
-def fit(X, Y, regr, kernel, theta, noise=0.0, max_noise=0.0):
+def fit(X, Y, regr, kernel, theta, noise=0.0):
+    """Generalized least-squares fit of the Dace Kriging model at a fixed theta.
 
+    Builds the correlation matrix, Cholesky-factorizes it (with the deliberate ``noise``
+    nugget on the unit diagonal), and solves the GLS trend/residual system, returning the
+    full model dict consumed by prediction and theta selection.
+
+    Args:
+        X: Standardized design sites, shape ``(n, d)``.
+        Y: Standardized targets, shape ``(n,)`` or ``(n, q)``.
+        regr: Regression trend basis.
+        kernel: Correlation kernel.
+        theta: Length-scale parameters for the kernel.
+        noise: Deliberate noise-to-signal ratio added to the unit diagonal (``0`` interpolates,
+            ``>0`` smooths), on top of the always-present machine-epsilon floor.
+
+    Returns:
+        The fitted model dict (``C``, ``beta``, ``gamma``, ``obj``, ``_sigma2``, ...).
+
+    Raises:
+        DaceFitError: ``R`` is not positive-definite at the requested noise, or ``F`` is too
+            ill-conditioned on these design sites.
+    """
     # number of sample points (rows of the design matrix)
     n_sample = X.shape[0]
 
@@ -30,34 +49,16 @@ def fit(X, Y, regr, kernel, theta, noise=0.0, max_noise=0.0):
 
     # do the cholesky decomposition. The diagonal carries the DELIBERATE observation
     # `noise` (a noise-to-signal ratio on R's unit diagonal: 0 -> interpolate, >0 ->
-    # regression GP that smooths through points), always added. If R is still not
-    # positive-definite, a SEPARATE `repair` term climbs from a tiny floor up to
-    # `max_noise` -- independent of `noise`, so the repair budget works regardless of how
-    # much deliberate noise was set -- until R factorizes. max_noise=0 permits no repair,
-    # so a non-PD R raises and the optimizers read that as an infeasible theta. If even
-    # max_noise cannot make R PD, we stop and raise. The recorded model["noise"] is the
-    # deliberate noise + repair (the always-on `base` machine-eps jitter is excluded as a
-    # negligible numerical floor, not a modeling term).
-    repair = 0.0
-    while True:
-        R = R0 + np.eye(n_sample) * (base + noise + repair)
-        try:
-            C = np.linalg.cholesky(R)
-            break
-        except LinAlgError as e:
-            nxt = repair * 2.0 if repair > 0.0 else 1e-12
-            if nxt > max_noise:
-                raise DaceFitError("Error while doing Cholesky Decomposition.") from e
-            repair = nxt
-
-    noise = noise + repair
-    if repair > 0.0:
-        warnings.warn(
-            f"R was not positive-definite at the requested noise; added repair={repair:g} "
-            f"(<= max_noise) for a total noise of {noise:g} -- a regularized fit, not an "
-            f"exact interpolator.",
-            stacklevel=2,
-        )
+    # regression GP that smooths through points), always added on top of the `base`
+    # machine-eps floor. There is no silent auto-repair climb: if R is not positive-
+    # definite at the requested noise, we raise -- and the theta optimizers read that as
+    # an infeasible theta. To regularize a non-PD fit, raise `noise` / `noise_bounds`
+    # explicitly; we never add hidden nugget behind the caller's back.
+    R = R0 + np.eye(n_sample) * (base + noise)
+    try:
+        C = np.linalg.cholesky(R)
+    except LinAlgError as e:
+        raise DaceFitError("R is not positive-definite at the requested noise -- increase noise / noise_bounds.") from e
 
     # fit the least squares for regression
     F = regr(X)
@@ -134,17 +135,16 @@ def _cholesky_batch(R):
         return feasible, C
 
 
-def batch_obj_grad(X, Y, regr, kernel, thetas, noise=0.0, with_grad=True):
+def batch_obj_grad(X, Y, regr, kernel, thetas, noise=0.0, with_grad=True, noise_grad=False):
     """Objective and theta-gradient of the Dace likelihood for a population of theta.
 
-    The batched, lock-step counterpart of a loop over ``fit`` + ``objective_gradient``:
-    it builds the stacked ``(J, n, n)`` correlation tensor and runs one batched Cholesky
-    / GLS solve, so J theta candidates cost a single set of LAPACK calls instead of J
-    Python-level fits. Non-positive-definite candidates are reported as infeasible (an
-    infinite objective and a zero gradient) rather than raising, exactly as a theta
-    search treats them. The objective matches ``fit(...)["obj"]`` and the gradient
-    matches ``objective_gradient`` slice-for-slice -- this is a pure vectorization of
-    those two already-tested functions.
+    The batched, lock-step counterpart of a loop over ``fit``: it builds the stacked
+    ``(J, n, n)`` correlation tensor and runs one batched Cholesky / GLS solve, so J theta
+    candidates cost a single set of LAPACK calls instead of J Python-level fits.
+    Non-positive-definite candidates are reported as infeasible (an infinite objective and a
+    zero gradient) rather than raising, exactly as a theta search treats them. The objective
+    matches ``fit(...)["obj"]`` slice-for-slice, and the gradient is the analytic derivative of
+    that likelihood -- this is a pure vectorization of the already-tested ``fit``.
 
     Args:
         X: Standardized design sites, shape ``(n, d)``.
@@ -153,18 +153,25 @@ def batch_obj_grad(X, Y, regr, kernel, thetas, noise=0.0, with_grad=True):
         kernel: Correlation kernel.
         thetas: Population of length-scales, shape ``(J, p)``.
         noise: Deliberate noise-to-signal ratio added to the unit diagonal -- a scalar, or a
-            per-candidate array ``(J,)`` to score different nugget levels in one batch (so
-            ``noise='auto'`` can screen the nugget jointly with theta). No climbing; a non-PD
-            candidate at this noise is simply infeasible.
+            per-candidate array ``(J,)`` to score different nugget levels in one batch (the
+            learned-nugget path, where ``noise`` is a search coordinate driven by
+            ``noise_bounds``). No climbing; a non-PD candidate at this noise is simply infeasible.
         with_grad: Whether to compute the theta-gradient. ``False`` skips the gradient
             work entirely (the dominant cost: forming ``Rinv``, the per-theta kernel
             derivatives, and the trace terms) and returns a zero gradient -- used for the
             cheap objective-only screening of a large candidate pool.
+        noise_grad: Also return ``df/d(noise)`` per candidate. The nugget enters as
+            ``R = R0(theta) + noise * I``, so its derivative is the ``Rk = I`` special case of
+            the theta-gradient: ``df/d(noise) = (detR/n) * (s * tr(Rinv) - sum_q ||gamma_q||^2)``.
+            This is what lets an optimizer treat the noise as just another coordinate of the
+            search vector. Implies the gradient block (requires ``with_grad``); the extra cost
+            is one trace per candidate since ``Rinv`` and ``gamma`` are already formed.
 
     Returns:
         ``(obj, grad, feasible)`` -- objectives ``(J,)`` (``inf`` where infeasible),
         gradients ``(J, p)`` (``0`` where infeasible, or everywhere if ``with_grad`` is
-        False), and the feasibility mask ``(J,)``.
+        False), and the feasibility mask ``(J,)``. When ``noise_grad`` is set, a fourth
+        element ``dnoise`` ``(J,)`` (``0`` where infeasible) is appended.
     """
     thetas = np.atleast_2d(np.asarray(thetas, dtype=float))
     J, p = thetas.shape
@@ -174,6 +181,15 @@ def batch_obj_grad(X, Y, regr, kernel, thetas, noise=0.0, with_grad=True):
 
     obj = np.full(J, np.inf)
     grad = np.zeros((J, p))
+    dnoise = np.zeros(J)
+
+    # underdetermined trend (more regression-basis columns than design points): there is no GLS
+    # fit at ANY theta, and a nugget regularizes R, not F -- so report every candidate infeasible
+    # rather than letting the QR/solve raise. Honors the never-raise contract for a degenerate
+    # regression x design (e.g. QuadraticRegression on too few points).
+    if regr(X).shape[1] > n:
+        feas = np.zeros(J, dtype=bool)
+        return (obj, grad, feas, dnoise) if noise_grad else (obj, grad, feas)
 
     base = (10 + n) * 2.220446049250313e-16
     # noise may be a scalar (same nugget for all) or a per-candidate (J,) array; reshape so
@@ -184,7 +200,7 @@ def batch_obj_grad(X, Y, regr, kernel, thetas, noise=0.0, with_grad=True):
     feasible, C = _cholesky_batch(R)
     idx = np.flatnonzero(feasible)
     if idx.size == 0:
-        return obj, grad, feasible
+        return (obj, grad, feasible, dnoise) if noise_grad else (obj, grad, feasible)
 
     # work on the feasible subset only -- a singular C would break the batched solves
     R, C, th = R[idx], C[idx], thetas[idx]
@@ -216,6 +232,14 @@ def batch_obj_grad(X, Y, regr, kernel, thetas, noise=0.0, with_grad=True):
         # so one O(n^3) inverse amortizes over p, cheaper than a triangular solve per k.
         Cinv = np.linalg.solve(C, np.broadcast_to(np.eye(n), C.shape))
         Rinv = np.swapaxes(Cinv, 1, 2) @ Cinv  # (m, n, n)
+
+        if noise_grad:
+            # df/d(noise) is the Rk = I special case: tr(Rinv * I) = tr(Rinv), and the
+            # quadratic term sum_q gamma_q^T I gamma_q = sum_q ||gamma_q||^2.
+            tr_Rinv = np.einsum("mii->m", Rinv)  # (m,)
+            gamma_sq = np.sum(gamma**2, axis=(1, 2))  # sum over n and q, (m,)
+            dnoise[idx] = (detR / n) * (s * tr_Rinv - gamma_sq)
+
         D = np.repeat(X, n, axis=0) - np.tile(X, (n, 1))  # (n*n, d), the kernel-matrix layout
         # Loop over the (small) population rather than pre-stacking a single (m, n, n, p)
         # derivative tensor -- that tensor grows as m*n^2*p (tens of MB by n=120) and the
@@ -233,5 +257,6 @@ def batch_obj_grad(X, Y, regr, kernel, thetas, noise=0.0, with_grad=True):
     # the same way -- infeasible, zero gradient -- so callers never see NaN.
     bad = ~np.isfinite(obj)
     grad[bad] = 0.0
+    dnoise[bad] = 0.0
     feasible = feasible & ~bad
-    return obj, grad, feasible
+    return (obj, grad, feasible, dnoise) if noise_grad else (obj, grad, feasible)

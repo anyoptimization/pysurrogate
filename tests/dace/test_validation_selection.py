@@ -5,22 +5,24 @@ import pytest
 
 from pysurrogate.dace.corr import Gaussian
 from pysurrogate.dace.dace import Dace
-from pysurrogate.dace.optimizers import LBFGS, Boxmin
 from pysurrogate.dace.regr import ConstantRegression
+from pysurrogate.optimizer import LBFGS, Boxmin
+
+_DEFAULT = object()  # local sentinel: "let Dace pick its default optimizer"
 
 
 def _fun(X):
     return np.sum(np.sin(X * 2 * np.pi), axis=1)
 
 
-def _model(optimizer=None):
+def _model(optimizer=_DEFAULT):
+    kw = {} if optimizer is _DEFAULT else {"optimizer": optimizer}
     return Dace(
         regr=ConstantRegression(),
         corr=Gaussian(),
         theta=1.0,
-        thetaL=1e-5,
-        thetaU=100.0,
-        optimizer=optimizer,
+        theta_bounds=(1e-5, 100.0),
+        **kw,
     )
 
 
@@ -109,30 +111,10 @@ def test_append_false_keeps_model_on_training_rows_only():
     assert np.all(np.isfinite(m.predict(X).y))
 
 
-def test_validation_selects_min_heldout_in_boxmin_trajectory():
-    # the core contract of _select with a mask: among every feasible theta Boxmin
-    # visited, the chosen model is the one with the lowest held-out error. append=False
-    # so the returned model IS that selected (train-only) candidate.
-    rng = np.random.default_rng(4)
-    X = rng.random((26, 1))
-    y = _fun(X) + 0.05 * rng.standard_normal(26)
-    mask = np.zeros(26, dtype=bool)
-    mask[::4] = True
-
-    m = _model(optimizer=Boxmin())
-    m.fit(X, y, validation=mask, append=False)
-
-    nXv, nYv = _norm(m, X[mask], y[mask])
-    feasible = [c for c in m.optimization["models"] if "gamma" in c]
-    errs = [m._val_error(c, nXv, nYv) for c in feasible]
-    chosen = m._val_error(m.model, nXv, nYv)
-    assert chosen == pytest.approx(min(errs), rel=1e-12, abs=1e-12)
-
-
-def test_lbfgs_validation_selects_from_history():
-    # LBFGS records its full search history when a mask is given, so even a single
-    # descent (n_restarts=0) selects among many visited thetas. The chosen model has
-    # the minimum held-out error over that recorded history.
+def test_generic_validation_selects_and_stays_in_bounds():
+    # the generic layer's held-out selection (ValidationSelection callback) yields a valid
+    # train-only model: theta in bounds, finite predictions. The deeper "picks the lowest
+    # held-out error" contract is covered in test_problem.py.
     rng = np.random.default_rng(7)
     X = rng.random((25, 1))
     y = _fun(X) + 0.08 * rng.standard_normal(25)
@@ -148,9 +130,8 @@ def test_lbfgs_validation_selects_from_history():
 
 
 def test_refit_validation_uses_new_points_and_appends():
-    # refit(validation=True): the new points steer the theta search (they are the
-    # held-out set) AND are appended to the model afterwards. The per-call optimizer
-    # override is still restored.
+    # refit(validation=True): the new points steer the theta search (they are the held-out set)
+    # AND are appended afterwards. The model's configured optimizer is restored after the call.
     rng = np.random.default_rng(5)
     X0 = rng.random((15, 1))
 
@@ -159,9 +140,9 @@ def test_refit_validation_uses_new_points_and_appends():
     m.fit(X0, _fun(X0))
 
     Xn = rng.random((8, 1))
-    m.refit(Xn, _fun(Xn), optimizer=LBFGS(), validation=True)
+    m.refit(Xn, _fun(Xn), validation=True)  # warm, uses the configured optimizer
 
-    assert m.optimizer is configured  # per-call override restored
+    assert m.optimizer is configured  # restored after the call
     assert m.model["X"].shape[0] == 23  # new points appended
     assert np.all(np.isfinite(m.predict(np.linspace(0, 1, 30)[:, None]).y))
 

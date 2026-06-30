@@ -1,11 +1,11 @@
 """Invertible input/output transformations used by the model lifecycle (normalization, plog)."""
 
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 
 import numpy as np
 
 
-class Transformation:
+class Transformation(ABC):
     """Invertible map applied to inputs or outputs before/after fitting.
 
     A transform normalizes data on the way into a backend (``forward``) and un-normalizes
@@ -68,6 +68,9 @@ class Standardization(Transformation):
             self.mean = np.mean(X, axis=0)
         if self.std is None:
             self.std = np.std(X, axis=0)
+        # a constant dimension has std 0; map it to scale 1 (matching ZeroToOneNormalization and
+        # the Dace fit) so forward centers it to 0 instead of dividing by zero into NaN/inf
+        self.std = np.where(np.asarray(self.std) == 0.0, 1.0, self.std)
         return (X - self.mean) / self.std
 
     def backward(self, X):
@@ -112,14 +115,14 @@ class Plog(Transformation):
     """
 
     def forward(self, y):
-        yp = np.zeros_like(y)
+        yp = np.zeros_like(y, dtype=float)
         larger = y >= 0
         yp[larger] = np.log(1 + y[larger])
         yp[~larger] = -np.log(1 - y[~larger])
         return yp
 
     def backward(self, yp):
-        y = np.zeros_like(yp)
+        y = np.zeros_like(yp, dtype=float)
         larger = yp >= 0
         y[larger] = np.exp(yp[larger]) - 1
         y[~larger] = 1 - np.exp(-yp[~larger])

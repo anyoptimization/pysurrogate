@@ -16,8 +16,7 @@ def _fit(regr, corr, d, seed=0, n=20):
         regr=regr,
         corr=corr,
         theta=0.5 * np.ones(d),
-        thetaL=0.05 * np.ones(d),
-        thetaU=10.0 * np.ones(d),
+        theta_bounds=(0.05 * np.ones(d), 10.0 * np.ones(d)),
     )
     model.fit(X, y)
     return model, X
@@ -93,13 +92,18 @@ def test_mse_grad_supports_std_gradient_for_ei():
     p = model.predict(q, mse=True, grad=True)
     std_grad = p.mse_grad[0] / (2.0 * np.sqrt(p.mse[0, 0]))
 
-    eps = 1e-6
+    # 4-point central stencil (O(eps^4) truncation) -- the MLE fit here is near-degenerate
+    # (over-smoothed, mse ~ 1e-7), so a 2-point FD reference is too noisy to validate against.
+    def _std(x):
+        return np.sqrt(model.predict(x, mse=True).mse[0, 0])
+
+    eps = 1e-5
     fd = np.zeros(2)
     for k in range(2):
-        qp, qm = q.copy(), q.copy()
-        qp[0, k] += eps
-        qm[0, k] -= eps
-        fd[k] = (np.sqrt(model.predict(qp, mse=True).mse[0, 0]) - np.sqrt(model.predict(qm, mse=True).mse[0, 0])) / (
-            2 * eps
-        )
+        q1, q2, q3, q4 = (q.copy() for _ in range(4))
+        q1[0, k] += 2 * eps
+        q2[0, k] += eps
+        q3[0, k] -= eps
+        q4[0, k] -= 2 * eps
+        fd[k] = (-_std(q1) + 8 * _std(q2) - 8 * _std(q3) + _std(q4)) / (12 * eps)
     assert np.allclose(std_grad, fd, rtol=1e-4, atol=1e-6)

@@ -14,14 +14,6 @@ from pysurrogate.dace.corr import (
 )
 from pysurrogate.dace.dace import Dace
 from pysurrogate.dace.fit import DaceFitError
-from pysurrogate.dace.optimizers import (
-    LBFGS,
-    Boxmin,
-    Fixed,
-    Optimizer,
-    ScreenedLBFGS,
-    VectorizedAdam,
-)
 from pysurrogate.dace.regr import (
     ConstantRegression,
     LinearRegression,
@@ -46,11 +38,4 @@ __all__ = [
     "Spherical",
     "RationalQuadratic",
     "Matern",
-    # theta optimizers
-    "Optimizer",
-    "Boxmin",
-    "Fixed",
-    "LBFGS",
-    "ScreenedLBFGS",
-    "VectorizedAdam",
 ]

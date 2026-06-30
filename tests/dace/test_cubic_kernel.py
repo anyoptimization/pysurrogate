@@ -30,7 +30,7 @@ def test_cubic_kernel_fits_despite_non_pd_start_theta():
     from pysurrogate.dace.corr import calc_kernel_matrix
 
     X, y = _cubic_dataset()
-    model = Dace(regr=LinearRegression(), corr=Cubic(), theta=1.0, thetaL=1e-5, thetaU=100.0)
+    model = Dace(regr=LinearRegression(), corr=Cubic(), theta=1.0, theta_bounds=(1e-5, 100.0))
     model.fit(X, y)
 
     assert np.all(np.isfinite(model.predict(X).y))
@@ -44,86 +44,22 @@ def test_cubic_kernel_fits_despite_non_pd_start_theta():
 
 def test_no_feasible_theta_raises_by_default():
     # [0.5, 1.0] is an entirely non-PD bracket for cubic on this data, needing ~1.2%
-    # noise -- far above the default max_noise=1e-4 numerical-repair ceiling -- so the
-    # default must still surface the infeasibility loudly.
+    # noise. There is no auto-repair noise climb, so a search that finds no positive-
+    # definite theta must surface the infeasibility loudly (fix it by setting noise).
     X, y = _cubic_dataset()
-    model = Dace(regr=LinearRegression(), corr=Cubic(), theta=0.7, thetaL=0.5, thetaU=1.0)
+    model = Dace(regr=LinearRegression(), corr=Cubic(), theta=0.7, theta_bounds=(0.5, 1.0))
     with pytest.raises(Exception, match="positive-definite"):
         model.fit(X, y)
 
 
-def test_no_feasible_theta_climbs_within_max_noise_ceiling():
-    # with a generous max_noise the same case must not crash: it climbs the noise to the
-    # smallest amount that makes R positive-definite (with a warning), records it, predicts.
+def test_no_feasible_theta_fits_when_noise_is_set():
+    # the supported way to fit an otherwise-infeasible bracket: set a deliberate noise
+    # large enough to regularize R (a regression GP), instead of any hidden climb.
     X, y = _cubic_dataset()
-    model = Dace(regr=LinearRegression(), corr=Cubic(), theta=0.7, thetaL=0.5, thetaU=1.0, max_noise=1.0)
-    with pytest.warns(UserWarning, match="noise"):
-        model.fit(X, y)
+    model = Dace(regr=LinearRegression(), corr=Cubic(), theta=0.7, theta_bounds=(0.5, 1.0), noise=0.05)
+    model.fit(X, y)
     assert np.all(np.isfinite(model.predict(X).y))
-    noise = model.model["noise"]
-    assert 0.0 < noise <= 1.0  # regularized, within ceiling
-
-
-def test_validation_split_keeps_both_train_and_full_spd():
-    # the SPD requirement applies to TWO matrices: R over the train rows (built during
-    # the search) and R over all rows (the append=True final fit). On this all-non-PD
-    # cubic bracket, with a validation mask and a max_noise ceiling, BOTH are
-    # regularized to positive-definiteness independently -- the search anchors a
-    # feasible train model, and the final all-rows fit climbs its own noise.
-    from pysurrogate.dace.corr import calc_kernel_matrix
-
-    X, y = _cubic_dataset()
-    mask = np.zeros(X.shape[0], dtype=bool)
-    mask[::4] = True  # ~1/4 held out for theta selection
-
-    model = Dace(regr=LinearRegression(), corr=Cubic(), theta=0.7, thetaL=0.5, thetaU=1.0, max_noise=1.0)
-    with pytest.warns(UserWarning, match="noise"):
-        model.fit(X, y, validation=mask)
-
-    # the committed all-rows model is SPD (its recorded noise made it so)
-    assert model.model["noise"] > 0.0
-    np.linalg.cholesky(model.model["R"])  # raises if not SPD
-
-    # and the noise was genuinely necessary: the raw full correlation matrix at the
-    # chosen theta is non-SPD without it
-    nX = model.model["nX"]
-    R_raw = calc_kernel_matrix(nX, nX, Cubic(), theta=model.model["theta"])
-    assert np.linalg.eigvalsh(R_raw).min() < 0.0
-    assert np.all(np.isfinite(model.predict(X).y))
-
-
-def test_repair_climbs_independent_of_deliberate_noise():
-    # the repair budget (max_noise) is ADDED ON TOP of the deliberate noise, not an
-    # absolute ceiling: even when max_noise < noise, a non-PD R is still repaired by
-    # climbing above noise. (An absolute-ceiling design raised immediately here, because
-    # the first climb step already exceeds a max_noise that sits below noise.)
-    from pysurrogate.dace.corr import calc_kernel_matrix
-    from pysurrogate.dace.fit import fit
-
-    X, y = _cubic_dataset()
-    nX = (X - X.mean(0)) / X.std(0, ddof=1)
-    nY = (y - y.mean(0)) / y.std(0, ddof=1)
-    theta = 0.7
-    deficit = -np.linalg.eigvalsh(calc_kernel_matrix(nX, nX, Cubic(), theta)).min()
-    assert deficit > 0  # genuinely non-PD at this theta
-
-    noise = deficit * 0.8  # deliberate noise just under the deficit -> still non-PD
-    max_noise = deficit * 0.5  # BELOW noise (the regime that broke an absolute ceiling)
-    with pytest.warns(UserWarning, match="repair"):
-        model = fit(nX, nY, LinearRegression(), Cubic(), theta, noise=noise, max_noise=max_noise)
-
-    assert max_noise < noise  # confirm we are in the previously-broken regime
-    assert model["noise"] > noise  # repair was climbed on top of the deliberate noise
-    np.linalg.cholesky(model["R"])  # and the result is positive-definite
-
-
-def test_max_noise_too_small_still_raises():
-    # a ceiling below what the bracket needs (min eigenvalue ~ -0.012) cannot restore
-    # positive-definiteness, so it stops and raises -- the ceiling is a hard limit.
-    X, y = _cubic_dataset()
-    model = Dace(regr=LinearRegression(), corr=Cubic(), theta=0.7, thetaL=0.5, thetaU=1.0, max_noise=1e-6)
-    with pytest.raises(Exception, match="positive-definite"):
-        model.fit(X, y)
+    np.linalg.cholesky(model.model["R"])  # the deliberate noise made R positive-definite
 
 
 def test_cubic_correlation_matrix_is_not_pd_at_start_theta():

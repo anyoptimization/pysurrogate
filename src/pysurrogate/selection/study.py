@@ -4,14 +4,39 @@ import copy
 
 import numpy as np
 
-from pysurrogate.core.metrics import POINT_METRICS, evaluate, get_metric
 from pysurrogate.dace import Exponential, Gaussian, Matern, RationalQuadratic
 from pysurrogate.models import KNN, RBF, SVR, InverseDistanceWeighting, Kriging, SimpleMean
 from pysurrogate.selection.factory import as_named, cartesian
+from pysurrogate.selection.metrics import POINT_METRICS, evaluate, metric_sort_key
+
+
+def default_kriging():
+    """Return the Kriging kernel zoo -- the *uncertainty-providing* surrogates.
+
+    Every model here returns a predictive variance (and gradient), so this is the fleet to select
+    over when the chosen model must drive an acquisition function (EI/UCB) -- unlike the broader
+    :func:`default_models`, whose Mean/KNN/IDW/SVR/RBF baselines report no ``sigma``. Kernels:
+    Gaussian, Exponential, the Matern family (nu=1.5/2.5; nu=0.5 equals Exponential), and
+    Rational-Quadratic swept over alpha (heavier tails as alpha shrinks).
+    """
+    return cartesian(
+        Kriging,
+        corr={
+            "gauss": Gaussian(),
+            "exp": Exponential(),
+            **{f"matern[{nu}]": Matern(nu) for nu in (1.5, 2.5)},
+            **{f"rq[{a}]": RationalQuadratic(a) for a in (0.1, 0.25, 0.5, 1.0)},
+        },
+    )
 
 
 def default_models():
-    """Return a dict of ready-to-use surrogate prototypes that need no optional dependencies."""
+    """Return a broad fleet of ready-to-use surrogate prototypes (no optional dependencies).
+
+    The mean/KNN/IDW/SVR/RBF baselines plus the :func:`default_kriging` kernel zoo -- good for
+    accuracy comparison. For a model that must report uncertainty (e.g. a BO surrogate), select
+    over :func:`default_kriging` instead, since the baselines return no ``sigma``.
+    """
     return {
         "Mean": SimpleMean(),
         "KNN": KNN(),
@@ -19,18 +44,7 @@ def default_models():
         "SVR": SVR(),
         "RBF[tps]": RBF(kernel="tps", tail="linear"),
         "RBF[mq]": RBF(kernel="mq", tail="linear"),
-        # Kriging kernel zoo: Gaussian, Exponential, the Matern family (nu=1.5/2.5; nu=0.5 is
-        # omitted as it is identical to Exponential), and Rational-Quadratic swept over alpha
-        # (heavier tails as alpha shrinks).
-        **cartesian(
-            Kriging,
-            corr={
-                "gauss": Gaussian(),
-                "exp": Exponential(),
-                **{f"matern[{nu}]": Matern(nu) for nu in (1.5, 2.5)},
-                **{f"rq[{a}]": RationalQuadratic(a) for a in (0.1, 0.25, 0.5, 1.0)},
-            },
-        ),
+        **default_kriging(),
     }
 
 
@@ -103,15 +117,9 @@ class StudyResult:
         names = list(self.raw)
         ranks: dict = {n: [] for n in names}
         for metric in self.metrics():
-            m = get_metric(metric)
             means = self.mean(metric)
-            if m.target is not None:
-                tgt = m.target
-                order = sorted(names, key=lambda n: np.inf if np.isnan(means[n]) else abs(means[n] - tgt))
-            else:
-                gib = m.greater_is_better
-                worst = -np.inf if gib else np.inf
-                order = sorted(names, key=lambda n: worst if np.isnan(means[n]) else means[n], reverse=gib)
+            # shared direction logic with Benchmark: smaller key = better (target- and direction-aware)
+            order = sorted(names, key=lambda n: metric_sort_key(metric, means[n]))
             for rank, n in enumerate(order):
                 ranks[n].append(rank)
         avg = {n: float(np.mean(r)) if r else np.nan for n, r in ranks.items()}

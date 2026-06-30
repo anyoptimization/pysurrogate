@@ -16,8 +16,10 @@ from pysurrogate.dace.fit import DaceFitError
 from pysurrogate.dace.regr import ConstantRegression, QuadraticRegression
 
 
-def _model(regr=ConstantRegression(), theta=0.5, thetaL=None, thetaU=None):
-    return Dace(regr=regr, corr=Gaussian(), theta=theta, thetaL=thetaL, thetaU=thetaU)
+def _model(regr=ConstantRegression(), theta=0.5):
+    # optimizer=None -> no theta search: these contracts exercise the fixed-theta fit() path
+    # directly on degenerate inputs (theta_bounds=None now means an unbounded search, not "fixed").
+    return Dace(regr=regr, corr=Gaussian(), theta=theta, optimizer=None)
 
 
 def _line(n=10):

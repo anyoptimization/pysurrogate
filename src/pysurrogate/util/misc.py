@@ -1,7 +1,8 @@
 """Miscellaneous array helpers shared across the surrogate lifecycle."""
 
 import numpy as np
-from scipy.spatial.distance import cdist  # type: ignore[import-untyped]
+
+from pysurrogate.util.dist import euclidean_dist
 
 
 def at_least2d(x, expand="c"):
@@ -37,7 +38,7 @@ def is_duplicate(X, eps=1e-16):
     Returns:
         A length-``n`` boolean array, ``True`` for rows that repeat an earlier row.
     """
-    D = cdist(X, X)
+    D = euclidean_dist(X, X)
     D[np.triu_indices(len(X))] = np.inf
 
     mask = np.full(len(X), False)

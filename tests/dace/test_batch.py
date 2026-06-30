@@ -1,11 +1,9 @@
-"""Tests for the batched theta primitive and the VectorizedAdam optimizer."""
+"""Tests for the batched theta primitive (objective + analytic gradient + feasibility)."""
 
 import numpy as np
 
 from pysurrogate.dace.corr import Gaussian, Matern
-from pysurrogate.dace.dace import Dace
 from pysurrogate.dace.fit import _cholesky_batch, batch_obj_grad, fit
-from pysurrogate.dace.optimizers import VectorizedAdam, objective_gradient
 from pysurrogate.dace.regr import ConstantRegression
 
 GAUSS = Gaussian()
@@ -22,7 +20,21 @@ def _standardized(seed, d, n=18, q=1):
     return nX, nY
 
 
-# --- the keystone: batch_obj_grad == loop of fit + objective_gradient ---
+def _fd_grad(nX, nY, regr, kernel, theta, h=1e-6):
+    """Central-difference gradient of the batched objective at a single theta (theta-space)."""
+    theta = np.atleast_1d(np.asarray(theta, float))
+    g = np.zeros_like(theta)
+    for k in range(len(theta)):
+        tp, tm = theta.copy(), theta.copy()
+        tp[k] += h
+        tm[k] -= h
+        fp = batch_obj_grad(nX, nY, regr, kernel, tp[None], with_grad=False)[0][0]
+        fm = batch_obj_grad(nX, nY, regr, kernel, tm[None], with_grad=False)[0][0]
+        g[k] = (fp - fm) / (2 * h)
+    return g
+
+
+# --- the keystone: batch_obj_grad's objective == fit()'s objective ---
 
 
 def test_batch_obj_matches_fit_isotropic():
@@ -45,26 +57,25 @@ def test_batch_obj_matches_fit_ard():
         assert np.isclose(obj[i], fit(nX, nY, CONSTANT, GAUSS, t)["obj"], rtol=1e-10, atol=1e-12)
 
 
-def test_batch_grad_matches_objective_gradient_isotropic():
+# --- the analytic batch gradient matches finite differences of the batch objective ---
+
+
+def test_batch_grad_matches_fd_isotropic():
     nX, nY = _standardized(2, 3)
     thetas = np.array([[0.3], [1.1], [4.0]])
     _, grad, _ = batch_obj_grad(nX, nY, CONSTANT, GAUSS, thetas)
 
     for i, t in enumerate(thetas):
-        model = fit(nX, nY, CONSTANT, GAUSS, t)
-        ref = objective_gradient(nX, model, t, GAUSS.theta_grad)
-        assert np.allclose(grad[i], ref, rtol=1e-8, atol=1e-10)
+        assert np.allclose(grad[i], _fd_grad(nX, nY, CONSTANT, GAUSS, t), rtol=1e-5, atol=1e-7)
 
 
-def test_batch_grad_matches_objective_gradient_ard():
+def test_batch_grad_matches_fd_ard():
     nX, nY = _standardized(3, 3)
     thetas = np.array([[0.5, 1.3, 0.9], [2.0, 0.3, 4.0]])
     _, grad, _ = batch_obj_grad(nX, nY, CONSTANT, GAUSS, thetas)
 
     for i, t in enumerate(thetas):
-        model = fit(nX, nY, CONSTANT, GAUSS, t)
-        ref = objective_gradient(nX, model, t, GAUSS.theta_grad)
-        assert np.allclose(grad[i], ref, rtol=1e-8, atol=1e-10)
+        assert np.allclose(grad[i], _fd_grad(nX, nY, CONSTANT, GAUSS, t), rtol=1e-5, atol=1e-7)
 
 
 def test_batch_matches_for_a_product_kernel_and_multioutput():
@@ -78,8 +89,7 @@ def test_batch_matches_for_a_product_kernel_and_multioutput():
     for i, t in enumerate(thetas):
         model = fit(nX, nY, CONSTANT, matern, t)
         assert np.isclose(obj[i], model["obj"], rtol=1e-10, atol=1e-12)
-        ref = objective_gradient(nX, model, t, matern.theta_grad)
-        assert np.allclose(grad[i], ref, rtol=1e-8, atol=1e-10)
+        assert np.allclose(grad[i], _fd_grad(nX, nY, CONSTANT, matern, t), rtol=1e-5, atol=1e-7)
 
 
 # --- Gaussian.batch == the looping default ---
@@ -115,81 +125,3 @@ def test_batch_obj_grad_feasible_thetas_never_raise():
     assert feasible.all()
     assert np.all(np.isfinite(obj))
     assert np.all(np.isfinite(grad))
-
-
-# --- VectorizedAdam end to end ---
-
-
-def test_vectorized_adam_improves_objective_and_predicts():
-    rng = np.random.default_rng(2)
-    X = rng.random((25, 2))
-    y = np.sum(np.sin(X * 3.0), axis=1)
-
-    model = Dace(
-        regr=CONSTANT,
-        corr=GAUSS,
-        theta=np.array([1.0, 1.0]),
-        thetaL=[1e-4, 1e-4],
-        thetaU=[50.0, 50.0],
-        optimizer=VectorizedAdam(pop_size=6, steps=40),
-    )
-    model.fit(X, y)
-
-    start_obj = fit(model.model["nX"], model.model["nY"], CONSTANT, GAUSS, np.array([1.0, 1.0]))["f"]
-    assert model.model["f"] <= start_obj + 1e-9
-    assert np.all(np.isfinite(model.predict(rng.random((5, 2))).y))
-    assert model.optimization["pop_size"] == 6
-
-
-def test_vectorized_adam_isotropic_theta():
-    rng = np.random.default_rng(7)
-    X = rng.random((22, 2))
-    y = np.sum(np.sin(X * 3.0), axis=1)
-
-    model = Dace(regr=CONSTANT, corr=GAUSS, theta=1.0, thetaL=1e-4, thetaU=100.0, optimizer=VectorizedAdam())
-    model.fit(X, y)
-
-    assert np.ravel(model.model["theta"]).shape == (1,)
-    assert np.all(np.isfinite(model.predict(rng.random((4, 2))).y))
-
-
-def test_vectorized_adam_escapes_a_bad_starting_basin():
-    # from the lower-bound plateau a single descent stays stuck; a diverse population
-    # must reach the good optimum (mirrors the LBFGS-restarts test).
-    rng = np.random.default_rng(3)
-    X = rng.random((30, 1))
-    y = np.sin(X[:, 0] * 12.0)
-
-    model = Dace(
-        regr=CONSTANT,
-        corr=GAUSS,
-        theta=1e-4,
-        thetaL=1e-4,
-        thetaU=100.0,
-        optimizer=VectorizedAdam(pop_size=12),
-    )
-    model.fit(X, y)
-
-    assert model.model["f"] < 1e-2
-    assert np.ravel(model.model["theta"])[0] > 1e-4  # moved off the plateau
-
-
-def test_vectorized_adam_works_in_refit_with_validation():
-    rng = np.random.default_rng(4)
-    X = rng.random((20, 2))
-    y = np.sum(np.sin(X * 3.0), axis=1)
-
-    model = Dace(
-        regr=CONSTANT,
-        corr=GAUSS,
-        theta=np.array([1.0, 1.0]),
-        thetaL=[1e-4, 1e-4],
-        thetaU=[50.0, 50.0],
-    )
-    model.fit(X, y)
-
-    Xn, yn = rng.random((4, 2)), np.sum(np.sin(rng.random((4, 2)) * 3.0), axis=1)
-    model.refit(Xn, yn, optimizer=VectorizedAdam(pop_size=5, steps=20))
-
-    assert model.model["X"].shape[0] == 24  # the new points were appended
-    assert np.all(np.isfinite(model.predict(rng.random((5, 2))).y))

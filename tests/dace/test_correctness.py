@@ -15,8 +15,8 @@ from pysurrogate.dace.corr import (
     Spline,
 )
 from pysurrogate.dace.dace import Dace
-from pysurrogate.dace.optimizers import Boxmin
 from pysurrogate.dace.regr import ConstantRegression, LinearRegression, QuadraticRegression
+from pysurrogate.optimizer import Boxmin
 
 
 def load(name, extensions):
@@ -120,15 +120,17 @@ class CorrectTest(unittest.TestCase):
                     load(name, ["x_train", "f_train", "x_test", "f_test", "mse", "grad"])
                 )
 
-                # pin Boxmin: this test validates the pattern-search trajectory against
-                # MATLAB Dace, so it must use that exact optimizer, not the library default.
+                # pin Boxmin for the optimization cases: this test validates the pattern-search
+                # trajectory against MATLAB Dace, so it must use that exact optimizer, not the
+                # library default. The fixed-theta cases (no bounds) use optimizer=None -- no
+                # search -- since "don't optimize" now lives on the optimizer, not on the bounds.
+                optimizer = None if thetaL is None else Boxmin()
                 dacefit = Dace(
                     regr=regr,
                     corr=corr,
                     theta=theta,
-                    thetaL=thetaL,
-                    thetaU=thetaU,
-                    optimizer=Boxmin(),
+                    theta_bounds=(thetaL, thetaU),
+                    optimizer=optimizer,
                 )
                 dacefit.fit(X_train, F_train)
 

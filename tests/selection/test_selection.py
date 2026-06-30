@@ -55,3 +55,42 @@ def test_model_selection_picks_and_refits_best():
     pred = sel.predict(X[:5])
     assert pred.y.shape == (5, 1) and np.all(np.isfinite(pred.y))
     assert list(sel.statistics())[0] == "rbf"
+
+
+def test_model_selection_defaults_to_recommended_fleet():
+    # ModelSelection() with no args selects over the recommended default fleet
+    X, y = _data()
+    sel = ModelSelection(sorted_by="rmse")
+    sel.fit(X, y)
+    assert sel.best is not None and len(sel.ranking) > 1  # a real fleet was benchmarked
+    assert np.all(np.isfinite(sel.predict(X[:5]).y))
+
+
+def test_model_selection_refit_refits_winner_only():
+    # refit refits the SELECTED winner on new data (no re-selection); the winner is unchanged
+    X, y = _data()
+    sel = ModelSelection({"mean": SimpleMean(), "rbf": RBF(kernel="gaussian"), "svr": SVR()}, sorted_by="rmse")
+    sel.fit(X[:40], y[:40])
+    winner_before = sel.best["label"]
+    n_before = sel.model._X.shape[0]
+
+    sel.refit(X[40:], y[40:])  # append the rest to the winner
+
+    assert sel.best["label"] == winner_before  # not re-selected
+    assert sel.model._X.shape[0] == n_before + (len(X) - 40)  # winner grew by the new points
+    assert np.all(np.isfinite(sel.predict(X[:5]).y))
+
+
+def test_model_selection_refit_best_false_keeps_fold_model():
+    # the renamed refit_best flag still controls whether the winner is refit on all data
+    from pysurrogate.core.partitioning import RandomPartitioning
+
+    X, y = _data()
+    sel = ModelSelection(
+        {"rbf": RBF(kernel="gaussian")},
+        sorted_by="rmse",
+        refit_best=False,
+        partitioning=RandomPartitioning(perc_train=0.7, n_sets=1, seed=0),
+    )
+    sel.fit(X, y)
+    assert np.all(np.isfinite(sel.predict(X[:5]).y))

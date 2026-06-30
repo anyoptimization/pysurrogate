@@ -1,21 +1,26 @@
 """Multi-output (q>1) coverage: shared-hyperparameter GP gradient + refit round-trip.
 
 The per-output sum in the objective (``sum_j sigma2_j``) and its envelope-theorem
-gradient term are where a multi-output bug would hide, so the analytic
-``objective_gradient`` is checked against finite differences with a matrix ``Y``;
-``refit`` is exercised end-to-end with matrix targets.
+gradient term are where a multi-output bug would hide, so the analytic batched gradient
+(``batch_obj_grad``) is checked against finite differences with a matrix ``Y``; ``refit``
+is exercised end-to-end with matrix targets.
 """
 
 import numpy as np
 
 from pysurrogate.dace.corr import Gaussian
 from pysurrogate.dace.dace import Dace
-from pysurrogate.dace.fit import fit
-from pysurrogate.dace.optimizers import LBFGS, Boxmin, objective_gradient
+from pysurrogate.dace.fit import batch_obj_grad, fit
 from pysurrogate.dace.regr import ConstantRegression
+from pysurrogate.optimizer import LBFGS
 
 GAUSS = Gaussian()
 CONSTANT = ConstantRegression()
+
+
+def _analytic_grad(nX, nY, theta):
+    """Analytic theta-gradient of the objective at a single theta via the batched primitive."""
+    return batch_obj_grad(nX, nY, CONSTANT, GAUSS, np.atleast_1d(theta)[None])[1][0]
 
 
 def _standardized_multi(seed, d=2, q=2, n=20):
@@ -49,8 +54,7 @@ def test_objective_gradient_matches_fd_with_matrix_Y():
     # and the envelope-theorem cancellation are handled correctly for q>1.
     nX, nY = _standardized_multi(0, d=2, q=3)
     for theta in (np.array([0.6, 0.6]), np.array([1.2, 0.4]), np.array([3.0, 2.0])):
-        model = fit(nX, nY, CONSTANT, GAUSS, theta)
-        analytic = objective_gradient(nX, model, theta, GAUSS.theta_grad)
+        analytic = _analytic_grad(nX, nY, theta)
         finite = _fd_grad(nX, nY, theta)
         assert analytic.shape == (2,)
         assert np.allclose(analytic, finite, rtol=1e-4, atol=1e-6), theta
@@ -71,16 +75,16 @@ def test_refit_roundtrip_with_matrix_Y():
         return np.column_stack([np.sum(np.sin(X * 3.0), axis=1), np.sum(np.cos(X * 2.0), axis=1)])
 
     def _model():
-        return Dace(regr=CONSTANT, corr=GAUSS, theta=1.0, thetaL=1e-4, thetaU=50.0)
+        return Dace(regr=CONSTANT, corr=GAUSS, theta=1.0, theta_bounds=(1e-4, 50.0))
 
     cold = _model()
     cold.fit(X_all, _Y(X_all))
 
     warm = _model()
     warm.fit(X0, _Y(X0))
-    # opt into the cold fit's semantics (MLE + same optimizer); the refit defaults
-    # (warm LBFGS + validation=True) optimize a different objective.
-    warm.refit(Xn, _Y(Xn), optimizer=Boxmin(), validation=False)
+    # opt into the cold fit's semantics (MLE over all data); the refit default validation=True
+    # optimizes a different objective. Same configured optimizer as the cold fit.
+    warm.refit(Xn, _Y(Xn), validation=False)
 
     assert warm.model["X"].shape[0] == 24
     xt = rng.random((10, 2))
@@ -89,8 +93,9 @@ def test_refit_roundtrip_with_matrix_Y():
     assert np.allclose(cold.predict(xt).y, warm.predict(xt).y, atol=5e-3)
 
 
-def test_lbfgs_objective_gradient_matrix_Y_end_to_end():
-    # the analytic-gradient LBFGS path must drive a matrix-Y fit to a valid optimum.
+def test_lbfgs_matrix_Y_end_to_end():
+    # the analytic-gradient (generic) LBFGS path must drive a matrix-Y fit to a valid optimum:
+    # at the converged interior theta the objective gradient is ~0.
     rng = np.random.default_rng(2)
     X = rng.random((22, 2))
     Y = np.column_stack([np.sum(np.sin(X * 3.0), axis=1), np.sum(np.cos(X * 2.0), axis=1)])
@@ -99,14 +104,13 @@ def test_lbfgs_objective_gradient_matrix_Y_end_to_end():
         regr=CONSTANT,
         corr=GAUSS,
         theta=np.array([1.0, 1.0]),
-        thetaL=[1e-4, 1e-4],
-        thetaU=[50.0, 50.0],
+        theta_bounds=([1e-4, 1e-4], [50.0, 50.0]),
         optimizer=LBFGS(options={"gtol": 1e-8, "ftol": 1e-12}),
     )
     model.fit(X, Y)
 
     theta = np.ravel(model.model["theta"])
-    grad = objective_gradient(model.model["nX"], model.model, theta, GAUSS.theta_grad)
+    grad = _analytic_grad(model.model["nX"], model.model["nY"], theta)
     interior = (theta > 1e-4 * 1.01) & (theta < 50.0 * 0.99)
     assert np.all(np.abs(grad[interior]) < 1e-3)
     assert model.predict(rng.random((5, 2))).y.shape == (5, 2)
@@ -124,8 +128,7 @@ def test_predict_grad_and_mse_grad_shapes_for_multioutput():
         regr=CONSTANT,
         corr=GAUSS,
         theta=0.5 * np.ones(2),
-        thetaL=0.05 * np.ones(2),
-        thetaU=10.0 * np.ones(2),
+        theta_bounds=(0.05 * np.ones(2), 10.0 * np.ones(2)),
     )
     model.fit(X, Y)
 
@@ -151,8 +154,7 @@ def test_predict_grad_and_mse_grad_shapes_for_multioutput():
         regr=CONSTANT,
         corr=GAUSS,
         theta=0.5 * np.ones(2),
-        thetaL=0.05 * np.ones(2),
-        thetaU=10.0 * np.ones(2),
+        theta_bounds=(0.05 * np.ones(2), 10.0 * np.ones(2)),
     )
     single.fit(X, Y[:, 0])
     assert single.predict(q, grad=True).grad.shape == (1, 2)

@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from pysurrogate.core import metrics
+from pysurrogate.selection import metrics
 
 
 def test_plain_metrics_zero_on_perfect_fit():

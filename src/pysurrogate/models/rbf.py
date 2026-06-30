@@ -29,10 +29,12 @@ class RBF(Model):
             raise ValueError(f"Unknown kernel function: {kernel!r}. Choose one of {sorted(KERNELS)}.")
         self.kernel = KERNELS[kernel]
 
-    def _fit(self, X, y, **kwargs):
+    def _fit(self, X, y, optimize=True, **kwargs):
         rho, tail, kernel, sigma, normalized = self.rho, self.tail, self.kernel, self.sigma, self.normalized
 
-        if self.optimize:
+        # tune sigma only when the model is configured to AND the fit-time flag allows it, so
+        # optimize=False forces the cheap fixed-sigma fit for model-selection screening (like Kriging)
+        if self.optimize and optimize:
             sigmas = np.linspace(0.0001, 20, 30)
             models = [rbf_fit(X, y, kernel, sigma=s, tail=tail, rho=rho, normalized=normalized) for s in sigmas]
             f = np.array([model["loocv"] for model in models])
@@ -112,31 +114,38 @@ def rbf_predict(model, X):
 
 
 def kernel_linear(r, sigma=1.0, **kwargs):
+    """Linear RBF kernel ``sigma * r`` over the squared distance ``r``."""
     return sigma * r
 
 
 def kernel_quadratic(r, sigma=1.0, **kwargs):
+    """Quadratic RBF kernel ``(sigma * r)**2`` over the squared distance ``r``."""
     return (sigma * r) ** 2
 
 
 def kernel_cubic(r, sigma=1.0, **kwargs):
+    """Cubic RBF kernel ``(sigma * r)**3`` over the squared distance ``r``."""
     return (sigma * r) ** 3
 
 
 def kernel_gaussian(r, sigma=None, **kwargs):
+    """Gaussian-shaped RBF kernel ``exp(-sigma * r**2)`` over the squared distance ``r``."""
     return np.exp(-(sigma * r**2))
 
 
 def kernel_periodic(r, sigma=1.0, **kwargs):
+    """Periodic RBF kernel (fixed period) over the squared distance ``r``."""
     return (sigma**2) * np.exp(-2 * np.sin((np.pi * r) / 5) ** 2)
 
 
 def kernel_multi_quadr(r, sigma=1.0, **kwargs):
+    """Multiquadric RBF kernel ``sqrt(r**2 + sigma**2)`` over the squared distance ``r``."""
     return ((r**2) + (sigma**2)) ** 0.5
 
 
 def kernel_tps(r, **kwargs):
-    r[r < np.finfo(float).eps] = np.finfo(float).eps
+    """Thin-plate-spline RBF kernel ``r**2 * log(r)`` (clamped) over the squared distance ``r``."""
+    r = np.where(r < np.finfo(float).eps, np.finfo(float).eps, r)
     return (r**2) * np.log(r)
 
 
@@ -166,30 +175,37 @@ def svd_inv(A):
 
 
 def dkernel_linear(r, sigma=1.0, **kwargs):
+    """Derivative ``d(kernel_linear)/dD`` w.r.t. the squared distance ``r``."""
     return np.full_like(r, float(sigma))
 
 
 def dkernel_quadratic(r, sigma=1.0, **kwargs):
+    """Derivative ``d(kernel_quadratic)/dD`` w.r.t. the squared distance ``r``."""
     return 2 * sigma**2 * r
 
 
 def dkernel_cubic(r, sigma=1.0, **kwargs):
+    """Derivative ``d(kernel_cubic)/dD`` w.r.t. the squared distance ``r``."""
     return 3 * sigma**3 * r**2
 
 
 def dkernel_gaussian(r, sigma=None, **kwargs):
+    """Derivative ``d(kernel_gaussian)/dD`` w.r.t. the squared distance ``r``."""
     return -2 * sigma * r * np.exp(-(sigma * r**2))
 
 
 def dkernel_periodic(r, sigma=1.0, **kwargs):
+    """Derivative ``d(kernel_periodic)/dD`` w.r.t. the squared distance ``r``."""
     return -(sigma**2) * (2 * np.pi / 5) * np.sin(2 * np.pi * r / 5) * np.exp(-2 * np.sin((np.pi * r) / 5) ** 2)
 
 
 def dkernel_multi_quadr(r, sigma=1.0, **kwargs):
+    """Derivative ``d(kernel_multi_quadr)/dD`` w.r.t. the squared distance ``r``."""
     return r / np.sqrt((r**2) + (sigma**2))
 
 
 def dkernel_tps(r, **kwargs):
+    """Derivative ``d(kernel_tps)/dD`` w.r.t. the squared distance ``r``."""
     r = np.where(r < np.finfo(float).eps, np.finfo(float).eps, r)
     return 2 * r * np.log(r) + r
 

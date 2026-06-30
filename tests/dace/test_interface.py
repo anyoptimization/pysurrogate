@@ -195,8 +195,7 @@ def test_dace_accepts_kernel_and_trend_instances():
         regr=QuadraticRegression(),
         corr=RationalQuadratic(alpha=0.5),
         theta=0.5,
-        thetaL=0.05,
-        thetaU=10.0,
+        theta_bounds=(0.05, 10.0),
     )
     model.fit(X, y)
     assert np.all(np.isfinite(model.predict(rng.random((4, 2))).y))

@@ -5,22 +5,24 @@ import pytest
 
 from pysurrogate.dace.corr import Gaussian
 from pysurrogate.dace.dace import Dace
-from pysurrogate.dace.optimizers import LBFGS, Boxmin, Fixed
 from pysurrogate.dace.regr import ConstantRegression
+from pysurrogate.optimizer import LBFGS, Boxmin
+
+_DEFAULT = object()  # local sentinel: "let Dace pick its default optimizer"
 
 
 def _fun(X):
     return np.sum(np.sin(X * 2 * np.pi), axis=1)
 
 
-def _model(theta=1.0, thetaL=1e-5, thetaU=100.0, optimizer=None):
+def _model(theta=1.0, theta_bounds=(1e-5, 100.0), optimizer=_DEFAULT):
+    kw = {} if optimizer is _DEFAULT else {"optimizer": optimizer}
     return Dace(
         regr=ConstantRegression(),
         corr=Gaussian(),
         theta=theta,
-        thetaL=thetaL,
-        thetaU=thetaU,
-        optimizer=optimizer,
+        theta_bounds=theta_bounds,
+        **kw,
     )
 
 
@@ -46,7 +48,7 @@ def test_refit_appends_and_matches_cold_fit_on_combined_data():
 
     warm = _model()
     warm.fit(X0, _fun(X0))
-    warm.refit(X_new, _fun(X_new), optimizer=Boxmin(), validation=False)  # only the additions
+    warm.refit(X_new, _fun(X_new), validation=False)  # only the additions, same configured optimizer
 
     x_test = np.linspace(0, 1, 50)[:, None]
     assert np.allclose(cold.predict(x_test).y, warm.predict(x_test).y, atol=1e-5)
@@ -80,9 +82,10 @@ def test_refit_warm_starts_from_previous_theta():
     assert not np.allclose(model.theta, 1.0)
 
 
-def test_refit_fixed_optimizer_freezes_theta_but_uses_new_data():
-    # Fixed() must not move theta, yet must still incorporate the new points
-    # (prediction changes because the data grew, not because theta did).
+def test_refit_optimizer_none_freezes_theta_but_uses_new_data():
+    # optimizer=None freezes theta (the replacement for the old Fixed()): theta must not
+    # move, yet the new points are still incorporated (prediction changes because the data
+    # grew, not because theta did).
     rng = np.random.default_rng(7)
     X0 = rng.random((12, 1))
     model = _model()
@@ -93,36 +96,36 @@ def test_refit_fixed_optimizer_freezes_theta_but_uses_new_data():
     pred_before = model.predict(x_test).y
 
     X_new = rng.random((6, 1))
-    model.refit(X_new, _fun(X_new), optimizer=Fixed())
+    model.refit(X_new, _fun(X_new), optimize=False)
 
     assert np.allclose(model.model["theta"], theta_before)  # theta frozen
     assert model.model["X"].shape[0] == 18  # data still appended
     assert not np.allclose(pred_before, model.predict(x_test).y)  # fit changed
 
 
-def test_refit_optimizer_override_is_per_call():
-    # passing an optimizer to refit must not change the model's configured one.
+def test_refit_restores_configured_optimizer():
+    # optimize=False frees theta for the duration of the call; the model's configured optimizer
+    # must be restored afterward (it is not mutated).
     rng = np.random.default_rng(8)
     X0 = rng.random((10, 1))
     configured = Boxmin()
     model = _model(optimizer=configured)
     model.fit(X0, _fun(X0))
 
-    model.refit(rng.random((4, 1)), _fun(rng.random((4, 1))), optimizer=Fixed())
-    assert model.optimizer is configured  # restored after the override
+    model.refit(rng.random((4, 1)), _fun(rng.random((4, 1))), optimize=False)
+    assert model.optimizer is configured  # restored after the call
 
 
-def test_refit_with_lbfgs_override_produces_valid_fit():
-    # a per-call lbfgs refine must append the data, keep theta within bounds, and
-    # yield finite predictions. (It need not match boxmin's optimum exactly -- on
-    # a flat likelihood the two local searches can settle on different theta.)
+def test_refit_warm_with_configured_optimizer_produces_valid_fit():
+    # a warm refit uses the model's configured optimizer (here LBFGS): it appends the data,
+    # keeps theta within bounds, and yields finite predictions.
     rng = np.random.default_rng(5)
     X0 = rng.random((15, 1))
     X_new = rng.random((8, 1))
 
-    model = _model()
+    model = _model(optimizer=LBFGS())
     model.fit(X0, _fun(X0))
-    model.refit(X_new, _fun(X_new), optimizer=LBFGS())
+    model.refit(X_new, _fun(X_new))  # warm, uses the configured LBFGS
 
     assert model.model["X"].shape[0] == 23
     theta = np.ravel(model.model["theta"])
@@ -131,26 +134,25 @@ def test_refit_with_lbfgs_override_produces_valid_fit():
 
 
 def test_lbfgs_as_configured_optimizer():
-    # LBFGS() works as the model-level configured optimizer too.
+    # the generic LBFGS works as the model-level configured optimizer too.
     rng = np.random.default_rng(6)
     X0 = rng.random((12, 1))
     model = _model(optimizer=LBFGS())
     model.fit(X0, _fun(X0))
-    # LBFGS now records its search on model.optimization (a single warm start here)
+    # the generic layer records its search on model.optimization (theta/noise/f/n_evals)
     assert model.optimization is not None
-    assert model.optimization["n_starts"] == 1
-    assert model.optimization["nfev"] >= 1
+    assert model.optimization["n_evals"] >= 1
     pred = model.predict(np.linspace(0, 1, 10)[:, None]).y
     assert np.all(np.isfinite(pred))
 
 
 def test_refit_without_optimization_reuses_theta():
-    # no bounds -> no hyperparameter search; refit keeps the last theta.
+    # optimizer=None -> no hyperparameter search; refit keeps the last theta frozen.
     rng = np.random.default_rng(2)
     X0 = rng.random((10, 1))
-    model = Dace(regr=ConstantRegression(), corr=Gaussian(), theta=2.0, thetaL=None, thetaU=None)
+    model = Dace(regr=ConstantRegression(), corr=Gaussian(), theta=2.0, optimizer=None)
     model.fit(X0, _fun(X0))
 
     X_new = rng.random((5, 1))
-    model.refit(X_new, _fun(X_new))
+    model.refit(X_new, _fun(X_new), optimize=False)  # freeze on refit too
     assert np.allclose(model.model["theta"], 2.0)

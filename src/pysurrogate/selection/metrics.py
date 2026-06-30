@@ -267,6 +267,29 @@ def greater_is_better(metric) -> bool:
     return get_metric(metric).greater_is_better
 
 
+def metric_sort_key(metric, value) -> float:
+    """Ranking sort key for ``metric`` where smaller is always better (best-first ascending).
+
+    The single source of truth for ranking direction, used by both ``Benchmark`` and
+    ``StudyResult`` so they agree. ``target``-anchored metrics (e.g. a calibration ratio whose
+    ideal is ``1.0``) rank by distance to the target; otherwise the sign flips for
+    greater-is-better metrics. A missing or non-finite value sorts last.
+
+    Args:
+        metric: Metric name or :class:`Metric`.
+        value: The metric value to turn into a sort key.
+
+    Returns:
+        A float key; sorting ascending puts the best model first.
+    """
+    m = get_metric(metric)
+    if value is None or not np.isfinite(value):
+        return np.inf
+    if m.target is not None:
+        return abs(value - m.target)
+    return -value if m.greater_is_better else value
+
+
 def calc_metric(metric, y, y_hat, sigma=None) -> float:
     """Compute a single metric by name."""
     return get_metric(metric)(y, y_hat, sigma=sigma)

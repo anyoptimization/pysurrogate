@@ -10,7 +10,8 @@ class SimpleMean(Model):
     """Baseline that predicts the training-target mean everywhere (a reference for selection)."""
 
     def _fit(self, X, y, **kwargs):
-        self.model = np.mean(y, axis=0)
+        self.model = np.atleast_1d(np.mean(y, axis=0))
 
     def _predict(self, X, var=False, grad=False):
-        return Prediction(y=np.full((len(X), 1), self.model))
+        # tile the per-output mean to (m, q) so multi-output targets do not break broadcasting
+        return Prediction(y=np.tile(self.model, (len(X), 1)))
