@@ -1,0 +1,18 @@
+/* Match the pymoo documentation typography. pymoo styles the article body with
+   PT Sans at 15px / weight 300; it references the font without importing it, so
+   we pull PT Sans from Google Fonts here so it actually renders as intended. */
+@import url("https://fonts.googleapis.com/css2?family=PT+Sans:wght@400;700&display=swap");
+
+.bd-article-container {
+    font-family: "PT Sans", Helvetica, Arial, sans-serif;
+    font-size: 15px;
+    font-weight: 300;
+    line-height: 1.5em;
+    letter-spacing: 0.2px;
+}
+
+@media (max-width: 768px) {
+    .bd-article-container {
+        font-size: 14px;
+    }
+}
