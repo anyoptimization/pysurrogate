@@ -30,8 +30,34 @@ Homepage = "https://github.com/anyoptimization/pysurrogate"
 [tool.hatch.build.targets.wheel]
 packages = ["src/pysurrogate"]
 
+# Documentation toolchain — installed into the project env
+# (`pip install -e . --group docs`) and driven by `pyclawd docs build` →
+# `python docs/cli.py`. Kept out of the shipped package (PEP 735 group, not an
+# extra).
+[dependency-groups]
+docs = [
+    # Sphinx + rendering
+    "sphinx>=7,<9",
+    "nbsphinx>=0.9,<1.0",
+    "sphinx-book-theme>=1.1,<2.0",
+    "sphinx-copybutton",
+    "numpydoc",
+    # Notebook compile + execute + cache
+    "jupytext",
+    "jupyter-cache",
+    "nbclient",
+    "nbconvert",
+    "nbformat",
+    "ipython",
+    "ipykernel",
+    # Needed to execute the example notebooks
+    "matplotlib",
+]
+
 [tool.ruff]
 line-length = 120
+# docs/ is a self-contained builder with its own toolchain — not project source.
+extend-exclude = ["docs"]
 
 [tool.ruff.lint]
 # One-line-per-file docstring doctrine: enable pydocstyle (D) but drop the

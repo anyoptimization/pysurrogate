@@ -1,6 +1,6 @@
 """pysurrogate's pyclawd config — drives `pyclawd test/lint/typecheck/...` for this repo."""
 
-from pyclawd import DoctorConfig, GoldenConfig, Project, QualityConfig, TestConfig
+from pyclawd import DocsConfig, DoctorConfig, GoldenConfig, Project, QualityConfig, TestConfig
 
 project = Project(
     name="pysurrogate",
@@ -32,6 +32,14 @@ project = Project(
         },
     ),
     golden=GoldenConfig(baseline_dir="tests/dace/golden", marker="golden"),
+    docs=DocsConfig(
+        runner=["python", "docs/cli.py"],
+        source_dir="docs/source",
+        cache_dir="docs/.jupyter_cache",
+        cache_db="docs/.jupyter_cache/global.db",
+        build_html="docs/build/html",
+        branch="main",
+    ),
     doctor=DoctorConfig(
         core_deps=["numpy", "scipy", "scikit-learn", "pandas"],
         dev_deps=["pytest", "pytest-xdist", "pytest-cov"],

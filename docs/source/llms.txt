@@ -1,0 +1,56 @@
+# pysurrogate
+
+> A unified surrogate-modeling toolkit for Python: sampling, Kriging/DACE, a model zoo, a
+> generic optimizer layer, uncertainty & calibration, and automatic model selection. Every
+> backend shares one `Model` contract — `fit` / `predict` / `refit` — so models are
+> interchangeable, and any of them can be benchmarked or auto-selected. NumPy/SciPy-based.
+
+## Install
+
+```bash
+pip install -U pysurrogate
+```
+
+## Headline API
+
+```python
+from pysurrogate import Kriging, Dace, AutoModel, study
+
+model = Kriging().fit(X, y)              # fit an interpolating GP surrogate
+pred = model.predict(Xq, var=True, grad=True)   # mean + calibrated variance + gradient
+pred.y, pred.sigma, pred.grad            # read fields by name, never by position
+
+auto = AutoModel().fit(X, y)             # benchmark a fleet, keep the winner (a drop-in Model)
+result = study(f, xl, xu, n=40)          # sweep a known function, rank models over repeats
+```
+
+- `Model` — the shared contract: `fit(X, y, optimize=True)`, `predict(X, var=, grad=)`,
+  `refit(X_new, y_new)`, `records()`. Handles normalization, NaN filtering, duplicates.
+- `Prediction` — value object with `.y`, `.var`, `.sigma`, `.grad`, `.var_grad`.
+- `Kriging` / `Dace` — the flagship: correlation-kernel zoo, regression trends, ARD, learned
+  noise, `calibrate()`, analytic gradients, multi-output. `Kriging` is the `Model` wrapper;
+  `Dace` is the configurable engine.
+- Model zoo: `RBF`, `SVR`, `KNN`, `InverseDistanceWeighting`, `SimpleMean`,
+  `PolynomialRegression`, `RandomForest`.
+- Optimizer layer: `Problem`, `Optimizer`, `Callback`, `Evaluation`, `Result`, and strategies
+  `LBFGS`, `PatternSearch`, `Boxmin`, `Adam`, `Restart` — surrogate-agnostic, reusable.
+- Sampling: `Sampling(n, LHS()|Random())` over a box with a local RNG.
+- Partitioning: `CrossvalidationPartitioning`, `RandomPartitioning`, `Split`.
+- Selection: `Benchmark`, `AutoModel`, `FunctionBenchmark`, `study`, `StudyResult`, `score`,
+  a direction-aware metrics registry, and `cartesian` / `as_named` fleet builders.
+
+## Documentation pages
+
+- Home: https://anyoptimization.com/projects/pysurrogate/
+- Getting started: https://anyoptimization.com/projects/pysurrogate/getting_started.html
+- The model zoo: https://anyoptimization.com/projects/pysurrogate/models.html
+- Kriging / DACE: https://anyoptimization.com/projects/pysurrogate/kriging.html
+- The optimizer layer: https://anyoptimization.com/projects/pysurrogate/optimizers.html
+- Sampling, partitioning & transforms: https://anyoptimization.com/projects/pysurrogate/sampling.html
+- Benchmarking & selection: https://anyoptimization.com/projects/pysurrogate/selection.html
+- API reference: https://anyoptimization.com/projects/pysurrogate/api.html
+
+## Links
+
+- Source: https://github.com/anyoptimization/pysurrogate
+- Install: `pip install -U pysurrogate`

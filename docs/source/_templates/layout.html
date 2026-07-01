@@ -1,0 +1,15 @@
+{% extends "!layout.html" %}
+{# Minimal head additions: SEO + social-share meta tags (the theme has none). #}
+{% block extrahead %}
+  {{ super() }}
+  <meta name="description" content="A unified surrogate-modeling toolkit for Python — sampling, Kriging/DACE, a model zoo, a generic optimizer layer, uncertainty & calibration, and automatic model selection.">
+  <meta name="keywords" content="surrogate model, metamodel, Kriging, DACE, Gaussian process, response surface, RBF, model selection, uncertainty, Bayesian optimization, design of experiments, Python">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="pysurrogate">
+  <meta property="og:description" content="Sampling, Kriging/DACE, a model zoo, a generic optimizer layer, and automatic model selection — surrogate modeling in Python.">
+  <meta property="og:url" content="https://anyoptimization.com/projects/pysurrogate/">
+  <meta property="og:image" content="https://anyoptimization.com/projects/pysurrogate/_static/pysurrogate.png">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="pysurrogate">
+  <meta name="twitter:description" content="Sampling, Kriging/DACE, a model zoo, a generic optimizer layer, and automatic model selection — surrogate modeling in Python.">
+{% endblock %}
