@@ -24,6 +24,9 @@ Kriging / DACE
 .. autoclass:: pysurrogate.Kriging
    :members:
 
+.. autoclass:: pysurrogate.KPLS
+   :members:
+
 Correlation kernels
 ~~~~~~~~~~~~~~~~~~~~~
 

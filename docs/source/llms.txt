@@ -30,6 +30,8 @@ result = study(f, xl, xu, n=40)          # sweep a known function, rank models o
 - `Kriging` / `Dace` — the flagship: correlation-kernel zoo, regression trends, ARD, learned
   noise, `calibrate()`, analytic gradients, multi-output. `Kriging` is the `Model` wrapper;
   `Dace` is the configurable engine.
+- `KPLS` — Kriging with Partial Least Squares: constrains the length-scales to a rank-`n_pls`
+  subspace so Kriging scales to high input dimensions, keeping variance and gradients.
 - Model zoo: `RBF`, `SVR`, `KNN`, `InverseDistanceWeighting`, `SimpleMean`,
   `PolynomialRegression`, `RandomForest`.
 - Optimizer layer: `Problem`, `Optimizer`, `Callback`, `Evaluation`, `Result`, and strategies
