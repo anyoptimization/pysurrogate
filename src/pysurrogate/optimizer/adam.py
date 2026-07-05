@@ -33,10 +33,13 @@ class Adam(Optimizer):
         self.random_state = random_state
 
     def _setup(self):
+        # Adam descends by gradient, so fail fast (like requires_x0) when the problem exposes none,
+        # rather than only discovering it on the first _advance.
+        if not self.problem.has_grad:
+            raise ValueError("Adam requires a problem that returns an analytic gradient.")
         # hard bounds clip the descent (may be +/-inf); seed the population from the finite
         # sampling region, since an infinite box cannot be uniformly sampled.
-        lo, hi = (np.atleast_1d(np.asarray(b, float)) for b in self.problem.bounds)
-        slo, shi = (np.atleast_1d(np.asarray(b, float)) for b in self.problem.sampling_bounds)
+        lo, hi, slo, shi = self._box()
         self._lo, self._hi = lo, hi
         rng = np.random.default_rng(self.random_state)
         if self.sampling is not None:
@@ -54,8 +57,7 @@ class Adam(Optimizer):
     def _advance(self):
         ev = self.problem(self._pop)
         self.n_evals += len(self._pop)
-        if ev.grad is None:
-            raise ValueError("Adam requires a problem that returns an analytic gradient.")
+        # gradient support was verified in _setup (fail-fast), so ev.grad is present here.
 
         for i in range(len(self._pop)):
             if bool(ev.feasible[i]):
@@ -63,9 +65,12 @@ class Adam(Optimizer):
                 if self._emit(self._pop[i], float(ev.f[i]), info):
                     return False
 
-        # one Adam step over the population. Mask infeasible candidates to a zero gradient so they
-        # genuinely do not move (the Evaluation contract does not promise a zero/finite grad for an
-        # infeasible row), mirroring LBFGS -- until a neighbor pulls them back into a feasible region.
+        # one Adam step over the population. Zero the gradient of infeasible candidates -- the
+        # Evaluation contract does not promise a finite grad for an infeasible row, and a NaN there
+        # would poison the shared momentum/variance state. Note this does not fully freeze such a
+        # point: population members are independent (no interacting neighbors), and accumulated
+        # momentum (self._m) can still nudge it -- which is fine, it drifts under inertia until a
+        # step lands it back in the feasible region.
         b1, b2, eps, t = 0.9, 0.999, 1e-8, self.n_iter
         g = np.where(ev.feasible[:, None], ev.grad, 0.0)
         self._m = b1 * self._m + (1 - b1) * g

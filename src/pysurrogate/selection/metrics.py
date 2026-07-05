@@ -317,13 +317,21 @@ def evaluate(y, y_hat, sigma=None, names=None) -> dict:
     Returns:
         ``{family: {metric_name: value}}`` for every evaluated metric.
     """
+
+    # one point of truth for "is this metric computable here": a probabilistic metric needs sigma.
+    # The same predicate drives the default name set AND filters an explicit `names` list, so
+    # passing a probabilistic metric without sigma silently drops it rather than raising
+    # inconsistently with the default path.
+    def _computable(m):
+        return m.kind == POINT or sigma is not None
+
     if names is None:
-        names = [name for name, m in _REGISTRY.items() if m.kind == POINT or sigma is not None]
+        names = [name for name, m in _REGISTRY.items() if _computable(m)]
 
     out: dict = {}
     for name in names:
         m = get_metric(name)
-        if m.kind == PROBABILISTIC and sigma is None:
+        if not _computable(m):
             continue
         out.setdefault(m.family, {})[name] = m(y, y_hat, sigma=sigma)
     return out

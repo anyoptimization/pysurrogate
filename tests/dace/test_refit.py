@@ -34,10 +34,10 @@ def test_refit_before_fit_raises():
 
 
 def test_refit_appends_and_matches_cold_fit_on_combined_data():
-    # refit takes only the new points; an MLE refit (validation=False) with the same
+    # refit takes only the new points; an MLE refit (validate=False) with the same
     # optimizer must equal a cold fit on the full combined set -- warm starting changes
     # the path, not the destination. (The refit *defaults* differ -- warm LBFGS +
-    # validation=True -- so this round-trip opts back into the cold fit's semantics.)
+    # validate=True -- so this round-trip opts back into the cold fit's semantics.)
     rng = np.random.default_rng(0)
     X0 = rng.random((15, 1))
     X_new = rng.random((10, 1))
@@ -48,7 +48,7 @@ def test_refit_appends_and_matches_cold_fit_on_combined_data():
 
     warm = _model()
     warm.fit(X0, _fun(X0))
-    warm.refit(X_new, _fun(X_new), validation=False)  # only the additions, same configured optimizer
+    warm.refit(X_new, _fun(X_new), validate=False)  # only the additions, same configured optimizer
 
     x_test = np.linspace(0, 1, 50)[:, None]
     assert np.allclose(cold.predict(x_test).y, warm.predict(x_test).y, atol=1e-5)

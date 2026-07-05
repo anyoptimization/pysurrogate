@@ -38,10 +38,10 @@ class Restart(Optimizer):
     def _setup(self):
         # seed candidates from the FINITE sampling region; the inner optimizer's descent is
         # constrained by the problem's hard bounds, which may be unbounded above.
-        lo, hi = (np.atleast_1d(np.asarray(b, float)) for b in self.problem.sampling_bounds)
+        _, _, slo, shi = self._box()
         rng = np.random.default_rng(self.random_state)
         extra = [self.x0] if self.x0 is not None else []
-        cand = self.sampling.sample((lo, hi), rng, include=extra)
+        cand = self.sampling.sample((slo, shi), rng, include=extra)
 
         if self.screen is not None and self.screen < len(cand):
             # cheap objective-only rank, then keep the best `screen` as the starts to polish

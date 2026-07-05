@@ -50,7 +50,7 @@ class LBFGS(Optimizer):
 
     def _setup(self):
         # one ITERATION here is one full local descent from one start; multi-start = many iters.
-        lo, hi = (np.atleast_1d(np.asarray(b, float)) for b in self.problem.bounds)
+        lo, hi, slo, shi = self._box()
         self._lo, self._hi = lo, hi
         # scipy L-BFGS-B wants None (not +/-inf) for an absent bound -- an inf passed through can
         # stall the bounded descent -- so translate each non-finite hard bound to None.
@@ -59,7 +59,6 @@ class LBFGS(Optimizer):
         ]
         # seed starts from the FINITE sampling region (an infinite hard box cannot be sampled);
         # the descent below is still free to leave it, constrained only by the hard bounds.
-        slo, shi = (np.atleast_1d(np.asarray(b, float)) for b in self.problem.sampling_bounds)
         if self.sampling is not None:
             rng = np.random.default_rng(self.random_state)
             extra = [self.x0] if self.x0 is not None else []

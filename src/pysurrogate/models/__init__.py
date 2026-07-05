@@ -3,6 +3,7 @@
 from pysurrogate.models.forest import RandomForest
 from pysurrogate.models.idw import InverseDistanceWeighting
 from pysurrogate.models.knn import KNN
+from pysurrogate.models.kpls import KPLS
 from pysurrogate.models.kriging import Kriging
 from pysurrogate.models.mean import SimpleMean
 from pysurrogate.models.rbf import RBF
@@ -11,6 +12,7 @@ from pysurrogate.models.svr import SVR
 
 __all__ = [
     "Kriging",
+    "KPLS",
     "RBF",
     "SVR",
     "KNN",

@@ -7,6 +7,36 @@ from pysurrogate.selection import StudyResult, study
 from pysurrogate.util.test_functions import TEST_FUNCTIONS, get_test_function
 
 
+def test_ranking_does_not_penalize_models_without_calibration_metrics():
+    # a point-only model that wins every point metric must rank first even though it scores NaN on
+    # the calibration metrics a probabilistic model can compute. Each metric is ranked only over the
+    # models that produced a finite value for it, so the inability to emit uncertainty cannot inflate
+    # a model's rank. Before the fix, NaN -> last place on 4 calibration metrics dragged the accurate
+    # point-only model below a less-accurate probabilistic one.
+    raw = {
+        "point_only": {
+            "rmse": [0.1],
+            "mae": [0.1],
+            "nlpd": [np.nan],
+            "crps": [np.nan],
+            "cal_err": [np.nan],
+            "calib": [np.nan],
+        },
+        "probabilistic": {
+            "rmse": [0.5],
+            "mae": [0.5],
+            "nlpd": [1.0],
+            "crps": [1.0],
+            "cal_err": [0.05],
+            "calib": [1.0],
+        },
+    }
+    res = StudyResult(raw, failures={}, meta={})
+    ranking = res.ranking()
+    assert list(ranking)[0] == "point_only"  # wins on the metrics it can actually compute
+    assert res.best() == "point_only"
+
+
 def test_test_functions_have_known_optimum():
     # every shipped function has its documented optimum of 0 at the origin (or all-ones)
     for name in ["sphere", "ackley", "rastrigin", "griewank"]:
@@ -49,3 +79,24 @@ def test_study_records_failures_and_metrics():
     assert result.failures["rbf"] == 0
     assert "rmse" in result.metrics()
     assert len(TEST_FUNCTIONS) >= 6
+
+
+def test_study_is_deterministic_under_seed():
+    # study delegates to FunctionBenchmark; a fixed seed must give a reproducible ranking + scores
+    f, xl, xu = get_test_function("sphere", n_var=2)
+    models = {"mean": SimpleMean(), "rbf": RBF(kernel="tps")}
+    a = study(f, xl, xu, n=25, models=models, n_test=80, repeats=2, seed=3)
+    b = study(f, xl, xu, n=25, models=models, n_test=80, repeats=2, seed=3)
+    assert a.ranking() == b.ranking()
+    assert np.isclose(a.mean("rmse")["rbf"], b.mean("rmse")["rbf"])
+    # a noise-free interpolant beats the constant mean on the smooth sphere
+    assert a.mean("rmse")["rbf"] < a.mean("rmse")["mean"]
+
+
+def test_study_train_noise_is_reproducible_and_keeps_ranking():
+    f, xl, xu = get_test_function("sphere", n_var=2)
+    models = {"mean": SimpleMean(), "rbf": RBF(kernel="tps")}
+    noisy = study(f, xl, xu, n=30, models=models, n_test=80, repeats=2, seed=5, noise=0.5)
+    again = study(f, xl, xu, n=30, models=models, n_test=80, repeats=2, seed=5, noise=0.5)
+    assert noisy.failures == again.failures
+    assert np.isclose(noisy.mean("rmse")["rbf"], again.mean("rmse")["rbf"])

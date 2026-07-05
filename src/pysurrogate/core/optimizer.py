@@ -83,6 +83,19 @@ class Problem(ABC):
         lo, _ = self.bounds
         return len(np.atleast_1d(lo))
 
+    @property
+    def has_grad(self):
+        """Whether the problem exposes an analytic gradient, probed once at the sampling box center.
+
+        Lets a gradient-based optimizer (e.g. :class:`~pysurrogate.optimizer.adam.Adam`) detect
+        gradient support up front and fail fast in ``setup`` instead of mid-search. The default
+        evaluates one central point and checks whether the :class:`Evaluation` carries a ``grad``;
+        a problem that knows its answer statically can override this to skip the probe.
+        """
+        slo, shi = (np.atleast_1d(np.asarray(b, float)) for b in self.sampling_bounds)
+        center = 0.5 * (slo + shi)
+        return self(center[None, :]).grad is not None
+
     def screen(self, X):
         """Cheap objective-only evaluation of a population, for ranking candidates.
 
@@ -229,6 +242,12 @@ class Optimizer(ABC):
         self.n_iter = 0
         self.n_evals = 0
         self.message = ""
+        # The trajectory of candidate vectors the search visited, in order -- part of the
+        # Optimizer contract so a consumer can read it uniformly across strategies. The base
+        # declares and resets it (empty); a strategy that wants a trajectory appends to it as it
+        # evaluates (pattern searches like Boxmin do, to feed the theta-trajectory snapshots).
+        # Strategies that keep no trajectory simply leave it empty -- never absent.
+        self.visited = []
 
     def setup(self, problem, x0=None, callback=None):
         """Bind the runtime context for one run; return ``self`` so calls can chain.
@@ -259,6 +278,7 @@ class Optimizer(ABC):
         self.is_done = False
         self.n_iter = self.n_evals = 0
         self.message = ""
+        self.visited = []  # reset the trajectory each run, before the strategy's _setup may seed it
         self._setup()
         self.is_setup = True
         return self
@@ -319,6 +339,18 @@ class Optimizer(ABC):
             self.message = "stopped early (callback)"
             return True
         return False
+
+    def _box(self):
+        """The problem's bounds as four 1-D arrays ``(lo, hi, slo, shi)``.
+
+        ``(lo, hi)`` are the hard :attr:`Problem.bounds` (may be infinite) and ``(slo, shi)`` the
+        finite :attr:`Problem.sampling_bounds` used to seed starts and scale steps. Centralizes the
+        ``np.atleast_1d(np.asarray(b, float))`` unpack every strategy's ``_setup`` would otherwise
+        repeat.
+        """
+        lo, hi = (np.atleast_1d(np.asarray(b, float)) for b in self.problem.bounds)
+        slo, shi = (np.atleast_1d(np.asarray(b, float)) for b in self.problem.sampling_bounds)
+        return lo, hi, slo, shi
 
     def _setup(self):
         """Optional hook for problem-dependent preparation, run at the end of :meth:`setup`.

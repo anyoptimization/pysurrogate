@@ -1,14 +1,41 @@
 """Backend-agnostic surrogate core: the Prediction type and the Model fit/predict lifecycle."""
 
+from pysurrogate.core.kernel import (
+    Correlation,
+    Cubic,
+    Exponential,
+    Gaussian,
+    GeneralizedExponential,
+    Kernel,
+    Linear,
+    Matern,
+    Multiquadric,
+    ProductKernel,
+    RadialKernel,
+    RationalQuadratic,
+    Spherical,
+    Spline,
+    ThinPlateSpline,
+    calc_kernel_matrix,
+    calc_kernel_tensor,
+)
 from pysurrogate.core.model import Model
 from pysurrogate.core.optimizer import Callback, Evaluation, Optimizer, Problem, Result
 from pysurrogate.core.partitioning import (
+    DEFAULT_CV_FOLDS,
     CrossvalidationPartitioning,
     Partitioning,
     RandomPartitioning,
     Split,
+    default_partitioning,
 )
 from pysurrogate.core.prediction import Prediction, predictions_frame
+from pysurrogate.core.regression import (
+    ConstantRegression,
+    LinearRegression,
+    QuadraticRegression,
+    Regression,
+)
 from pysurrogate.core.sampling import LHS, Random, Sampling, SamplingMethod
 from pysurrogate.core.transformation import (
     NoNormalization,
@@ -40,4 +67,27 @@ __all__ = [
     "CrossvalidationPartitioning",
     "RandomPartitioning",
     "Split",
+    "default_partitioning",
+    "DEFAULT_CV_FOLDS",
+    "Regression",
+    "ConstantRegression",
+    "LinearRegression",
+    "QuadraticRegression",
+    "Kernel",
+    "Correlation",
+    "ProductKernel",
+    "RadialKernel",
+    "Gaussian",
+    "Cubic",
+    "Exponential",
+    "Linear",
+    "GeneralizedExponential",
+    "Spline",
+    "Spherical",
+    "RationalQuadratic",
+    "Matern",
+    "ThinPlateSpline",
+    "Multiquadric",
+    "calc_kernel_matrix",
+    "calc_kernel_tensor",
 ]

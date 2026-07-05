@@ -1,10 +1,95 @@
 """pysurrogate — a unified surrogate-modeling toolkit (sampling, fitting, selection)."""
 
-from pysurrogate.core import Model, Prediction
+from pysurrogate.core import (
+    LHS,
+    Callback,
+    CrossvalidationPartitioning,
+    Evaluation,
+    Model,
+    Optimizer,
+    Partitioning,
+    Prediction,
+    Problem,
+    Random,
+    RandomPartitioning,
+    Result,
+    Sampling,
+    SamplingMethod,
+    Split,
+    predictions_frame,
+)
 from pysurrogate.dace import Dace
-from pysurrogate.models import Kriging
-from pysurrogate.selection import AutoModel, Benchmark, cartesian
+from pysurrogate.models import (
+    KNN,
+    KPLS,
+    RBF,
+    SVR,
+    InverseDistanceWeighting,
+    Kriging,
+    PolynomialRegression,
+    RandomForest,
+    SimpleMean,
+)
+from pysurrogate.optimizer import LBFGS, Adam, Boxmin, PatternSearch, Restart
+from pysurrogate.selection import (
+    AutoModel,
+    Benchmark,
+    FunctionBenchmark,
+    StudyResult,
+    as_named,
+    cartesian,
+    score,
+    study,
+)
 
 __version__ = "0.1.0"
 
-__all__ = ["Dace", "Kriging", "Model", "Prediction", "Benchmark", "AutoModel", "cartesian", "__version__"]
+__all__ = [
+    # core surrogate lifecycle
+    "Model",
+    "Prediction",
+    "predictions_frame",
+    # the flagship surrogate
+    "Dace",
+    # model backends
+    "Kriging",
+    "KPLS",
+    "RBF",
+    "SVR",
+    "KNN",
+    "InverseDistanceWeighting",
+    "SimpleMean",
+    "PolynomialRegression",
+    "RandomForest",
+    # generic optimizer layer
+    "Problem",
+    "Optimizer",
+    "Callback",
+    "Evaluation",
+    "Result",
+    "LBFGS",
+    "PatternSearch",
+    "Boxmin",
+    "Adam",
+    "Restart",
+    # sampling
+    "Sampling",
+    "SamplingMethod",
+    "LHS",
+    "Random",
+    # partitioning / cross-validation
+    "Partitioning",
+    "CrossvalidationPartitioning",
+    "RandomPartitioning",
+    "Split",
+    # benchmarking & selection front-ends
+    "Benchmark",
+    "AutoModel",
+    "FunctionBenchmark",
+    "study",
+    "StudyResult",
+    "score",
+    "cartesian",
+    "as_named",
+    "__version__",
+]

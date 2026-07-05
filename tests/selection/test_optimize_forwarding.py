@@ -60,4 +60,6 @@ def test_rbf_honors_fit_time_optimize_false():
     frozen.fit(X, y, optimize=False)
 
     # optimize=False must skip the sigma grid and keep the constructor sigma (1.0)
-    assert frozen.model["kwargs"]["sigma"] == 1.0
+    assert frozen.model["sigma"] == 1.0
+    # the tuned fit searched the grid, so it lands on a different sigma
+    assert tuned.model["sigma"] != 1.0

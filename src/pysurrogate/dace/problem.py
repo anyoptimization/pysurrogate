@@ -3,6 +3,7 @@
 import numpy as np
 
 from pysurrogate.core.optimizer import Evaluation, Problem
+from pysurrogate.core.parameter import Log10, Parameter, ParameterSpace
 from pysurrogate.dace.fit import batch_obj_grad, fit
 
 _LN10 = np.log(10.0)
@@ -44,35 +45,82 @@ class DaceProblem(Problem):
             search vector, or ``None`` (default) to keep ``noise`` fixed. Learning by likelihood
             alone tends to drive the nugget back toward 0 on clean data -- it pays off mainly with
             genuinely noisy data or validation selection.
+        theta_prior: ``(mean, lam)`` for a MAP prior on the length-scales, or ``None`` (default) for
+            pure maximum likelihood. When set, ``lam * sum((log10(theta) - mean)**2)`` is added to
+            the objective (and its analytic gradient) -- a Gaussian prior on the *encoded* (log10)
+            length-scales only (never the nugget coordinate), regularizing the search toward
+            ``10**mean`` and away from short-length-scale over-fitting. ``None`` -> zero penalty, so
+            the objective is bit-for-bit the plain likelihood.
     """
 
-    def __init__(self, X, Y, regr, kernel, theta_bounds, noise=None, noise_bounds=None):
+    def __init__(self, X, Y, regr, kernel, theta_bounds, noise=None, noise_bounds=None, theta_prior=None):
         self.X, self.Y = X, Y
         self.regr, self.kernel = regr, kernel
 
+        # optional MAP prior on the encoded length-scales: (mean, lam) or None for pure MLE.
+        self._prior = None if theta_prior is None else (float(theta_prior[0]), float(theta_prior[1]))
+
+        # the componentwise differences are theta-independent, so build them once here and reuse
+        # them across every objective/gradient evaluation of the search (instead of rebuilding the
+        # (n*n, d) matrix per call). Passing this one array also lets a reducing kernel (KPLS) cache
+        # its per-fit distance projection, keyed on this exact object.
+        n = X.shape[0]
+        self._D = np.repeat(X, n, axis=0) - np.tile(X, (n, 1))
+
+        # The search layout is the kernel's own declaration: the concatenated length-scale / shape
+        # coordinates it exposes via parameters(d), sized from the data dimensionality. The user's
+        # theta_bounds are distributed across those coordinates by position (in original space, with
+        # the machine-eps floor), then the nugget is appended as one more coordinate when learned.
+        # This replaces the old hard-coded "[theta..., noise]" assumption -- e.g. GeneralizedExponential
+        # declares its own trailing `power` coordinate here instead of it being smuggled into theta.
         lo, hi = theta_bounds
         lo = np.maximum(np.atleast_1d(np.asarray(lo, float)), _FLOOR)
         hi = np.atleast_1d(np.asarray(hi, float))
-        self._tlo, self._thi = np.broadcast_arrays(lo, hi)
-        self.p = len(self._thi)
+        tlo, thi = np.broadcast_arrays(lo, hi)
+        p_total = len(thi)
 
-        # noise_bounds set -> learn the nugget as a coordinate; else fixed (None -> 0).
+        # the length-scale ("fill") coordinates are caller-sized -- their ARD count comes from the
+        # supplied bounds, not the kernel's ard flag -- so the one fill parameter absorbs whatever is
+        # left after the kernel's fixed shape coordinates (e.g. GeneralizedExponential's exponent).
+        kparams = kernel.parameters(X.shape[1])
+        fixed = sum(kp.size for kp in kparams if not kp.fill)
+        params, i = [], 0
+        for kp in kparams:
+            size = (p_total - fixed) if kp.fill else kp.size
+            params.append(
+                Parameter(
+                    kp.name,
+                    size=size,
+                    bounds=(tlo[i : i + size], thi[i : i + size]),
+                    encoding=kp.encoding,
+                    fill=kp.fill,
+                )
+            )
+            i += size
+        if i != p_total:
+            raise ValueError(f"theta_bounds has {p_total} coordinates but the kernel declares {i}.")
+        self.p = p_total
+        self._theta_names = [p.name for p in params]
+
+        # noise_bounds set -> learn the nugget as a trailing coordinate; else fixed (None -> 0).
         self.learn_noise = noise_bounds is not None
         if self.learn_noise:
             nlo, nhi = noise_bounds
-            self._nlo, self._nhi = max(float(nlo), _FLOOR), float(nhi)
+            self.noise_bounds = (max(float(nlo), _FLOOR), float(nhi))  # value-space, for start clamping
+            params.append(Parameter("noise", size=1, bounds=self.noise_bounds, encoding=Log10()))
             self.noise = None
         else:
+            self.noise_bounds = None
             self.noise = 0.0 if noise is None else float(noise)
+
+        self.space = ParameterSpace(params)
 
     @property
     def bounds(self):
-        lo = np.log10(self._tlo)
-        hi = np.log10(self._thi)  # +inf where a theta coordinate is unbounded above
-        if self.learn_noise:
-            lo = np.append(lo, np.log10(self._nlo))
-            hi = np.append(hi, np.log10(self._nhi))
-        return lo, hi
+        # the encoded (log10) coordinate bounds for the whole search vector, assembled by the
+        # ParameterSpace from each parameter's value-space bounds and encoding (+inf survives where a
+        # theta coordinate is unbounded above).
+        return self.space.bounds()
 
     @property
     def sampling_bounds(self):
@@ -93,9 +141,11 @@ class DaceProblem(Problem):
             ``(theta, noise)`` -- the length-scale vector and the scalar nugget (the fixed
             ``noise`` when this problem does not learn it).
         """
-        x = np.atleast_1d(np.asarray(x, float))
-        theta = 10.0 ** x[: self.p]
-        noise = 10.0 ** x[self.p] if self.learn_noise else self.noise
+        values = self.space.decode(x)
+        # the kernel consumes its length-scale / shape coordinates as one positional vector, in the
+        # order they were declared; the nugget (when learned) is the trailing coordinate.
+        theta = np.concatenate([np.atleast_1d(values[name]) for name in self._theta_names])
+        noise = float(values["noise"][0]) if self.learn_noise else self.noise
         return theta, float(noise)
 
     def fit(self, x):
@@ -103,13 +153,31 @@ class DaceProblem(Problem):
         theta, noise = self.decode(x)
         return fit(self.X, self.Y, self.regr, self.kernel, theta, noise=noise)
 
+    def _prior_penalty(self, Z):
+        """MAP penalty ``lam * sum((z - mean)**2)`` per candidate over the log10 length-scales ``Z``.
+
+        Args:
+            Z: The encoded length-scale coordinates of the population, shape ``(J, p)``.
+
+        Returns:
+            The per-candidate penalty ``(J,)``, or ``0.0`` when no prior is set.
+        """
+        if self._prior is None:
+            return 0.0
+        mean, lam = self._prior
+        return lam * np.sum((Z - mean) ** 2, axis=1)
+
     def screen(self, X):
         """Cheap objective-only ranking (no gradient) -- the fast path for Restart's screen."""
         X = np.atleast_2d(np.asarray(X, float))
         thetas = 10.0 ** X[:, : self.p]
         noise = 10.0 ** X[:, self.p] if self.learn_noise else self.noise
-        obj, _, _ = batch_obj_grad(self.X, self.Y, self.regr, self.kernel, thetas, noise=noise, with_grad=False)
-        return obj
+        obj, _, _ = batch_obj_grad(
+            self.X, self.Y, self.regr, self.kernel, thetas, noise=noise, with_grad=False, D=self._D
+        )
+        # add the MAP penalty so the screen ranks by the SAME objective the gradient path polishes
+        # (infeasible candidates keep obj=+inf: inf + finite penalty = inf).
+        return obj + self._prior_penalty(X[:, : self.p])
 
     def __call__(self, X):
         X = np.atleast_2d(np.asarray(X, float))
@@ -117,16 +185,25 @@ class DaceProblem(Problem):
         if self.learn_noise:
             noise = 10.0 ** X[:, self.p]  # per-candidate nugget, (J,)
             obj, g_theta, feasible, dnoise = batch_obj_grad(
-                self.X, self.Y, self.regr, self.kernel, thetas, noise=noise, with_grad=True, noise_grad=True
+                self.X, self.Y, self.regr, self.kernel, thetas, noise=noise, with_grad=True, noise_grad=True, D=self._D
             )
         else:
             obj, g_theta, feasible = batch_obj_grad(
-                self.X, self.Y, self.regr, self.kernel, thetas, noise=self.noise, with_grad=True
+                self.X, self.Y, self.regr, self.kernel, thetas, noise=self.noise, with_grad=True, D=self._D
             )
 
         # chain rule from the original parameter to its log10 coordinate: d/d(log10 v) = v*ln10 * d/dv
         grad = g_theta * thetas * _LN10
         if self.learn_noise:
             grad = np.hstack([grad, (dnoise * noise * _LN10)[:, None]])
+
+        # MAP prior on the encoded length-scales: add lam*sum((z-mean)^2) to the objective and its
+        # gradient 2*lam*(z-mean) directly in log10 space (the search coordinate). Applied to the
+        # theta coordinates only, and only on feasible rows (infeasible keep obj=+inf, grad=0).
+        if self._prior is not None:
+            Z = X[:, : self.p]
+            mean, lam = self._prior
+            obj = obj + self._prior_penalty(Z)
+            grad[:, : self.p] += feasible[:, None] * (2.0 * lam * (Z - mean))
 
         return Evaluation(f=obj, feasible=feasible, grad=grad, info=None)

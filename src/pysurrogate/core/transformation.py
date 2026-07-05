@@ -22,6 +22,16 @@ class Transformation(ABC):
     def backward(self, X):
         """Map data back to the original space (inverse of ``forward``)."""
 
+    def reset(self):
+        """Drop any statistics estimated from data, restoring the as-constructed state.
+
+        A data-fitted transform (e.g. :class:`Standardization`) caches its statistics on the first
+        ``forward`` and would otherwise reuse them forever -- so a re-``fit`` on grown or different
+        data (the model ``refit`` lifecycle) would normalize with stale statistics. ``Model.fit``
+        calls this at the start of every fresh fit; the identity/affine transforms with no estimated
+        state override it as a no-op (the base is already a no-op).
+        """
+
     def scale(self):
         """Per-dimension affine scale of ``backward`` (the constant Jacobian diagonal).
 
@@ -60,8 +70,14 @@ class Standardization(Transformation):
     """Zero-mean / unit-variance standardization, fit from the data on first ``forward``."""
 
     def __init__(self, mean=None, std=None) -> None:
+        # remember the as-constructed values so reset() can distinguish user-provided statistics
+        # (kept) from data-estimated ones (dropped and re-estimated on the next fit).
+        self._mean0, self._std0 = mean, std
         self.mean = mean
         self.std = std
+
+    def reset(self):
+        self.mean, self.std = self._mean0, self._std0
 
     def forward(self, X):
         if self.mean is None:
@@ -84,9 +100,13 @@ class ZeroToOneNormalization(Transformation):
     """Min-max normalization to ``[0, 1]``, with bounds estimated from the data by default."""
 
     def __init__(self, xl=None, xu=None, estimate_bounds=True) -> None:
+        self._xl0, self._xu0 = xl, xu  # as-constructed bounds, restored by reset()
         self.xl = xl
         self.xu = xu
         self.estimate_bounds = estimate_bounds
+
+    def reset(self):
+        self.xl, self.xu = self._xl0, self._xu0
 
     def forward(self, X):
         if self.estimate_bounds:

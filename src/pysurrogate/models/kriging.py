@@ -17,65 +17,54 @@ class Kriging(Model):
     ``regr`` and ``corr`` are ``Dace`` objects passed straight through. The default kernel is
     ``RationalQuadratic(0.25)`` (the best all-round performer across the test-function
     benchmark) with a linear regression trend.
+
+    ``theta_prior=(mean, lam)`` turns on a MAP prior on the length-scale search (default ``None`` =
+    maximum likelihood); see :class:`~pysurrogate.dace.dace.Dace`. Prefer it over pure MLE when the
+    surrogate drives an optimization loop -- MLE over-fits short length-scales on small biased
+    designs and the resulting over-confidence poisons acquisition; ``lam~=0.01`` is a good start.
     """
 
-    def __init__(self, regr=None, corr=None, ARD=False, theta=1.0, theta_bounds=(0.0, 100.0), **kwargs) -> None:
+    def __init__(
+        self, regr=None, corr=None, ARD=False, theta=1.0, theta_bounds=(0.0, 100.0), theta_prior=None, **kwargs
+    ) -> None:
         super().__init__(eliminate_duplicates=True, **kwargs)
         self.regr = regr if regr is not None else LinearRegression()
         self.corr = corr if corr is not None else RationalQuadratic(0.25)
         self.ARD = ARD
         self.theta = theta
         self.theta_bounds = theta_bounds
+        self.theta_prior = theta_prior
 
     def _fit(self, X, y, optimize=True, **kwargs):
         theta, theta_bounds = self.theta, self.theta_bounds
 
-        # ARD (one length-scale per input dimension) broadcasts the scalar start/bounds to a
-        # per-dimension vector so the theta search tunes each dimension independently.
-        if self.ARD and theta_bounds is not None:
+        # ARD (one length-scale per input dimension) broadcasts the scalar start (and bounds, when
+        # finite) to a per-dimension vector so the theta search tunes each dimension independently.
+        # The start is broadcast even with theta_bounds=None -- Dace reads the ARD dimension from
+        # the start vector for an unbounded search, so ARD must not silently collapse to isotropic.
+        if self.ARD:
             _, m = X.shape
-            lo, hi = theta_bounds
             theta = np.full(m, theta)
-            theta_bounds = (np.full(m, lo), np.full(m, hi))
+            if theta_bounds is not None:
+                lo, hi = theta_bounds
+                theta_bounds = (np.full(m, lo), np.full(m, hi))
 
-        # optimize=False -> freeze theta (optimizer=None): the cheap fixed-length-scale fit used
-        # for model-selection screening and frozen-theta loop refits. optimize=True -> the default
-        # theta search.
-        extra = {} if optimize else {"optimizer": None}
-        self.model = Dace(regr=self.regr, corr=self.corr, theta=theta, theta_bounds=theta_bounds, **extra)
-        self.model.fit(X, y)
+        # `optimize` is the shared Model-contract lever: forwarded straight to Dace.fit, where
+        # optimize=False freezes theta (the cheap fixed-length-scale fit used for model-selection
+        # screening and frozen-theta loop refits) and optimize=True runs the configured search.
+        self.model = Dace(
+            regr=self.regr, corr=self.corr, theta=theta, theta_bounds=theta_bounds, theta_prior=self.theta_prior
+        )
+        self.model.fit(X, y, optimize=optimize)
 
-    def refit(self, X, y, optimize=True):
-        """Score the new points out-of-sample, then incrementally refit (warm-started theta).
-
-        Like :meth:`Model.refit`, the new points are first predicted by the current model and that
-        out-of-sample :class:`~pysurrogate.core.prediction.Prediction` is returned (prequential
-        validation -- collect it against ``y``). The re-fit then delegates to :meth:`Dace.refit`,
-        which appends the points and reuses the previously fitted theta: ``optimize=True``
-        warm-starts the length-scale search from it, ``optimize=False`` freezes it and only
-        re-solves the kernel matrix on the grown data.
-
-        Args:
-            X: The new input points to add (only the additions).
-            y: The targets for the new points.
-            optimize: ``True`` warm-starts the theta search; ``False`` freezes theta.
-
-        Returns:
-            The out-of-sample :class:`~pysurrogate.core.prediction.Prediction` of ``X`` from the
-            model *before* the new points were added.
-
-        Raises:
-            Exception: If called before a successful :meth:`fit`.
-        """
-        if self.model is None:
-            raise Exception("refit() requires a prior fit(); call fit() first.")
-        out_of_sample = self.predict(X, var=True)  # OLD model scores the unseen points
-        self._record(X, y, out_of_sample)  # accumulate into self.validation (epoch-stamped)
+    def _refit(self, X, y, optimize=True):
+        # incremental warm-started re-fit via the Dace engine (append + reuse the fitted theta):
+        # optimize=True warm-starts the length-scale search, optimize=False freezes it. The generic
+        # Model.refit handles the out-of-sample scoring and record; this is just the absorb step.
         self.model.refit(X, y, optimize=optimize)
-        return out_of_sample
 
     def _predict(self, X, var=False, grad=False):
-        # Dace.predict already returns the shared Prediction (its mse/mse_grad are aliases of
-        # var/var_grad), so this is a direct pass-through -- the mean, variance and gradients
-        # all share Dace's single Cholesky solve. The Model lifecycle un-normalizes them.
-        return self.model.predict(X, mse=var, grad=grad)
+        # Dace.predict now speaks the Model vocabulary (var=, grad=), so this is a direct
+        # pass-through with no name translation -- the mean, variance and gradients all share
+        # Dace's single Cholesky solve. The Model lifecycle un-normalizes them.
+        return self.model.predict(X, var=var, grad=grad)

@@ -2,17 +2,62 @@
 
 import numpy as np
 
+from pysurrogate.core.kernel import (
+    CubicRadial,
+    Gaussian,
+    LinearRadial,
+    Multiquadric,
+    ThinPlateSpline,
+    calc_kernel_matrix,
+)
 from pysurrogate.core.model import Model
 from pysurrogate.core.prediction import Prediction
-from pysurrogate.util.dist import calc_dist
+from pysurrogate.core.regression import (
+    ConstantRegression,
+    LinearRegression,
+    QuadraticRegression,
+)
+
+# RBF now shares the framework's one kernel zoo (:mod:`pysurrogate.core.kernel`) -- the same kernel
+# objects the Dace engine uses, evaluated on coordinate differences ``D`` (not a private
+# scalar-distance path). The radial bases are conditionally positive-definite interpolation kernels;
+# ``gaussian`` reuses the covariance Gaussian directly (so ``sigma`` is its length-scale). ``sigma``
+# maps to the kernel's ``theta`` shape parameter; the pure-power bases ignore it.
+_KERNELS = {
+    "linear": LinearRadial(),
+    "cubic": CubicRadial(),
+    "gaussian": Gaussian(),
+    "mq": Multiquadric(),
+    "tps": ThinPlateSpline(),
+}
+
+# The polynomial tail is the shared core regression basis -- one implementation of "build a
+# polynomial design matrix P(X) (+ gradient)" for the whole framework. "quadratic" and
+# "linear+quadratic" both resolve to the full quadratic basis (intercept + linear + pairwise).
+_TAILS = {
+    None: None,
+    "constant": ConstantRegression(),
+    "linear": LinearRegression(),
+    "quadratic": QuadraticRegression(),
+    "linear+quadratic": QuadraticRegression(),
+}
+
+
+def _tail_basis(tail):
+    """Resolve a tail name to its core regression basis (``None`` for no tail)."""
+    if tail not in _TAILS:
+        raise ValueError(f"Unknown tail: {tail!r}.")
+    return _TAILS[tail]
 
 
 class RBF(Model):
     """RBF interpolant: a kernel expansion over the training points plus a polynomial tail.
 
-    The kernel argument is the *squared* distance ``calc_dist`` returns. With ``optimize=True``
-    the shape parameter ``sigma`` is selected by minimizing leave-one-out cross-validation
-    error over a small grid.
+    The kernel is one of the shared :mod:`pysurrogate.core.kernel` bases (``linear``/``cubic`` radial
+    powers, ``gaussian`` covariance, ``mq`` multiquadric, ``tps`` thin-plate spline), evaluated on the
+    coordinate differences between points. ``sigma`` is the kernel's shape parameter (the Gaussian
+    length-scale, the multiquadric offset); the pure-power bases ignore it. With ``optimize=True``
+    ``sigma`` is selected by minimizing leave-one-out cross-validation error over a small grid.
     """
 
     def __init__(
@@ -25,9 +70,9 @@ class RBF(Model):
         self.normalized = normalized
         self.optimize = optimize
 
-        if kernel not in KERNELS:
-            raise ValueError(f"Unknown kernel function: {kernel!r}. Choose one of {sorted(KERNELS)}.")
-        self.kernel = KERNELS[kernel]
+        if kernel not in _KERNELS:
+            raise ValueError(f"Unknown kernel function: {kernel!r}. Choose one of {sorted(_KERNELS)}.")
+        self.kernel = _KERNELS[kernel]
 
     def _fit(self, X, y, optimize=True, **kwargs):
         rho, tail, kernel, sigma, normalized = self.rho, self.tail, self.kernel, self.sigma, self.normalized
@@ -51,30 +96,31 @@ class RBF(Model):
 
 def rbf_kernel(X, phi, tail="linear", **kwargs):
     """Append the polynomial-tail columns for ``tail`` to the kernel block ``phi``."""
-    n, _ = X.shape
-
-    if tail is None:
-        P = np.zeros((n, 0))
-    elif tail == "constant":
-        P = np.ones((n, 1))
-    elif tail == "linear":
-        P = np.column_stack((np.ones(n), X))
-    elif tail == "quadratic":
-        P = np.column_stack((np.ones(n), X**2))
-    elif tail == "linear+quadratic":
-        P = np.column_stack((np.ones(n), X, X**2))
-    else:
-        raise ValueError(f"Unknown tail: {tail!r}.")
-
+    basis = _tail_basis(tail)
+    P = np.zeros((X.shape[0], 0)) if basis is None else basis(X)
     return np.column_stack([phi, P])
 
 
-def rbf_fit(X, y, func, Xp=None, rho=0.0, normalized=False, **kwargs):
-    """Solve the RBF + polynomial-tail system and return the fitted model dict."""
+def rbf_fit(X, y, kernel, Xp=None, sigma=1.0, tail="linear", rho=0.0, normalized=False):
+    """Solve the RBF + polynomial-tail system and return the fitted model dict.
+
+    Args:
+        X: Training inputs, shape ``(n, d)``.
+        y: Training targets, shape ``(n, 1)``.
+        kernel: A :mod:`pysurrogate.core.kernel` kernel evaluated on coordinate differences.
+        Xp: Kernel centers; defaults to ``X`` (a full interpolant).
+        sigma: The kernel shape parameter (passed as the kernel's ``theta``).
+        tail: Polynomial-tail name (see :data:`_TAILS`).
+        rho: Ridge added to the kernel diagonal (``rho**2``) to regularize a near-singular system.
+        normalized: Whether to column-normalize the kernel block by its column sums.
+
+    Returns:
+        The fitted model dict consumed by :func:`rbf_predict` and :func:`rbf_grad`.
+    """
     if Xp is None:
         Xp = X
 
-    phi = func(calc_dist(X, Xp), **kwargs)
+    phi = calc_kernel_matrix(X, Xp, kernel, sigma)
 
     phi_norm = 1.0
     if normalized:
@@ -84,7 +130,7 @@ def rbf_fit(X, y, func, Xp=None, rho=0.0, normalized=False, **kwargs):
     if rho is not None:
         phi = phi + np.eye(len(phi)) * (rho**2)
 
-    K = rbf_kernel(X, phi, **kwargs)
+    K = rbf_kernel(X, phi, tail=tail)
     n, m = K.shape
 
     lhs = np.zeros((m, m))
@@ -102,62 +148,17 @@ def rbf_fit(X, y, func, Xp=None, rho=0.0, normalized=False, **kwargs):
     loocv = (e**2).sum()
     gcv = (c**2).sum() / (np.diag(Kinv).mean() ** 2)
 
-    return dict(X=X, cond=cond, e=e, loocv=loocv, gcv=gcv, coef=coef, func=func, phi_norm=phi_norm, kwargs=kwargs)
+    return dict(
+        X=X, kernel=kernel, sigma=sigma, tail=tail, phi_norm=phi_norm, coef=coef, cond=cond, e=e, loocv=loocv, gcv=gcv
+    )
 
 
 def rbf_predict(model, X):
     """Evaluate a fitted RBF model at the query points ``X``."""
-    phi = model["func"](calc_dist(X, model["X"]), **model["kwargs"])
+    phi = calc_kernel_matrix(X, model["X"], model["kernel"], model["sigma"])
     phi = phi / model["phi_norm"]
-    phi = rbf_kernel(X, phi, **model["kwargs"])
+    phi = rbf_kernel(X, phi, tail=model["tail"])
     return phi @ model["coef"]
-
-
-def kernel_linear(r, sigma=1.0, **kwargs):
-    """Linear RBF kernel ``sigma * r`` over the squared distance ``r``."""
-    return sigma * r
-
-
-def kernel_quadratic(r, sigma=1.0, **kwargs):
-    """Quadratic RBF kernel ``(sigma * r)**2`` over the squared distance ``r``."""
-    return (sigma * r) ** 2
-
-
-def kernel_cubic(r, sigma=1.0, **kwargs):
-    """Cubic RBF kernel ``(sigma * r)**3`` over the squared distance ``r``."""
-    return (sigma * r) ** 3
-
-
-def kernel_gaussian(r, sigma=None, **kwargs):
-    """Gaussian-shaped RBF kernel ``exp(-sigma * r**2)`` over the squared distance ``r``."""
-    return np.exp(-(sigma * r**2))
-
-
-def kernel_periodic(r, sigma=1.0, **kwargs):
-    """Periodic RBF kernel (fixed period) over the squared distance ``r``."""
-    return (sigma**2) * np.exp(-2 * np.sin((np.pi * r) / 5) ** 2)
-
-
-def kernel_multi_quadr(r, sigma=1.0, **kwargs):
-    """Multiquadric RBF kernel ``sqrt(r**2 + sigma**2)`` over the squared distance ``r``."""
-    return ((r**2) + (sigma**2)) ** 0.5
-
-
-def kernel_tps(r, **kwargs):
-    """Thin-plate-spline RBF kernel ``r**2 * log(r)`` (clamped) over the squared distance ``r``."""
-    r = np.where(r < np.finfo(float).eps, np.finfo(float).eps, r)
-    return (r**2) * np.log(r)
-
-
-KERNELS = {
-    "linear": kernel_linear,
-    "quadratic": kernel_quadratic,
-    "cubic": kernel_cubic,
-    "gaussian": kernel_gaussian,
-    "mq": kernel_multi_quadr,
-    "tps": kernel_tps,
-    "periodic": kernel_periodic,
-}
 
 
 def svd_inv(A):
@@ -168,87 +169,38 @@ def svd_inv(A):
     return A_inv, cond
 
 
-# --- analytic gradient -------------------------------------------------------------------
-# The kernels take r = calc_dist(...) which is the *squared* Euclidean distance D = ||x-xi||^2.
-# So each dkernel below is d(kernel)/dD, and the chain to the query point is dD/dx_j =
-# 2 (x_j - xi_j) -- no 1/r singularity at a center.
-
-
-def dkernel_linear(r, sigma=1.0, **kwargs):
-    """Derivative ``d(kernel_linear)/dD`` w.r.t. the squared distance ``r``."""
-    return np.full_like(r, float(sigma))
-
-
-def dkernel_quadratic(r, sigma=1.0, **kwargs):
-    """Derivative ``d(kernel_quadratic)/dD`` w.r.t. the squared distance ``r``."""
-    return 2 * sigma**2 * r
-
-
-def dkernel_cubic(r, sigma=1.0, **kwargs):
-    """Derivative ``d(kernel_cubic)/dD`` w.r.t. the squared distance ``r``."""
-    return 3 * sigma**3 * r**2
-
-
-def dkernel_gaussian(r, sigma=None, **kwargs):
-    """Derivative ``d(kernel_gaussian)/dD`` w.r.t. the squared distance ``r``."""
-    return -2 * sigma * r * np.exp(-(sigma * r**2))
-
-
-def dkernel_periodic(r, sigma=1.0, **kwargs):
-    """Derivative ``d(kernel_periodic)/dD`` w.r.t. the squared distance ``r``."""
-    return -(sigma**2) * (2 * np.pi / 5) * np.sin(2 * np.pi * r / 5) * np.exp(-2 * np.sin((np.pi * r) / 5) ** 2)
-
-
-def dkernel_multi_quadr(r, sigma=1.0, **kwargs):
-    """Derivative ``d(kernel_multi_quadr)/dD`` w.r.t. the squared distance ``r``."""
-    return r / np.sqrt((r**2) + (sigma**2))
-
-
-def dkernel_tps(r, **kwargs):
-    """Derivative ``d(kernel_tps)/dD`` w.r.t. the squared distance ``r``."""
-    r = np.where(r < np.finfo(float).eps, np.finfo(float).eps, r)
-    return 2 * r * np.log(r) + r
-
-
-KERNEL_GRADS = {
-    kernel_linear: dkernel_linear,
-    kernel_quadratic: dkernel_quadratic,
-    kernel_cubic: dkernel_cubic,
-    kernel_gaussian: dkernel_gaussian,
-    kernel_periodic: dkernel_periodic,
-    kernel_multi_quadr: dkernel_multi_quadr,
-    kernel_tps: dkernel_tps,
-}
-
-
 def _tail_grad(X, tail, c_tail):
-    """Gradient of the polynomial tail ``P(x) @ c_tail`` w.r.t. ``x``, shape ``(m, d)``."""
-    m, d = X.shape
-    g = np.zeros((m, d))
-    if tail == "linear":
-        g = g + c_tail[1 : 1 + d][None, :]
-    elif tail == "quadratic":
-        g = g + 2 * X * c_tail[1 : 1 + d][None, :]
-    elif tail == "linear+quadratic":
-        g = g + c_tail[1 : 1 + d][None, :] + 2 * X * c_tail[1 + d : 1 + 2 * d][None, :]
-    # tail is None or "constant" -> constant term, zero gradient
-    return g
+    """Gradient of the polynomial tail ``P(x) @ c_tail`` w.r.t. ``x``, shape ``(m, d)``.
+
+    Delegates to the shared core basis: ``basis.grad(X)`` is the per-row ``(d, p)`` Jacobian,
+    contracted with the tail coefficients ``c_tail``.
+    """
+    basis = _tail_basis(tail)
+    if basis is None:
+        return np.zeros(X.shape)
+    return basis.grad(X) @ c_tail  # (m, d, p) @ (p,) -> (m, d)
 
 
 def rbf_grad(model, X):
-    """Analytic gradient of the RBF prediction w.r.t. the query points, shape ``(m, d)``."""
+    """Analytic gradient of the RBF prediction w.r.t. the query points, shape ``(m, d)``.
+
+    The kernel expansion contributes ``sum_i w_i * grad phi(x - x_i)``, where ``grad phi`` is the
+    shared kernel's own spatial gradient and ``w_i`` folds in the fit coefficient and any column
+    normalization; the polynomial tail adds its basis Jacobian.
+    """
     Xc = model["X"]
-    kwargs = model["kwargs"]
+    kernel = model["kernel"]
+    sigma = model["sigma"]
+    m, d = X.shape
     n = Xc.shape[0]
 
-    diff = X[:, None, :] - Xc[None, :, :]  # (m, n, d)
-    D = (diff**2).sum(axis=2)  # (m, n) squared distance = the kernel argument
+    # componentwise differences in the calc_kernel_matrix layout, so kernel.grad gives d phi / d x
+    # for every (query, center) pair; reshape to (m, n, d) and contract with the center weights.
+    D = np.repeat(X, n, axis=0) - np.tile(Xc, (m, 1))  # (m*n, d)
+    G = kernel.grad(D, sigma).reshape(m, n, d)
 
-    dpsi = KERNEL_GRADS[model["func"]](D, **kwargs)  # (m, n) d(kernel)/dD
     coef = model["coef"][:, 0]
+    w = coef[:n] / np.asarray(model["phi_norm"]).ravel()  # center weights incl. column normalization
+    grad = np.einsum("n,mnd->md", w, G)
 
-    # center term: sum_i (c_i / phi_norm_i) * psi'(D) * dD/dx, with dD/dx = 2 * diff
-    w = (coef[:n][None, :] / model["phi_norm"]) * dpsi  # (m, n)
-    grad = 2.0 * np.einsum("mn,mnd->md", w, diff)
-
-    return grad + _tail_grad(X, kwargs.get("tail"), coef[n:])
+    return grad + _tail_grad(X, model["tail"], coef[n:])

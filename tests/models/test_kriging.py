@@ -14,6 +14,23 @@ def _branin_like():
     return X, y
 
 
+def test_ard_broadcasts_theta_even_with_no_bounds():
+    # Kriging(ARD=True, theta_bounds=None) must fit one length-scale per input dimension -- an
+    # unbounded ARD search -- and NOT silently collapse to a single isotropic length-scale. Frozen
+    # (optimize=False) so no optimizer is needed: the broadcast alone proves ARD was honored.
+    rng = np.random.RandomState(0)
+    X = rng.random((30, 3))
+    y = np.sin(3 * X[:, 0]) + 0.2 * X[:, 1]
+    m = Kriging(ARD=True, theta_bounds=None)
+    m.fit(X, y, optimize=False)
+    assert np.ravel(m.model.model["theta"]).shape == (3,)  # per-dimension, not (1,)
+
+    # the isotropic default still yields a single length-scale
+    iso = Kriging(ARD=False, theta_bounds=None)
+    iso.fit(X, y, optimize=False)
+    assert np.ravel(iso.model.model["theta"]).shape == (1,)
+
+
 def test_kriging_interpolates_training_points():
     X, y = _branin_like()
     model = Kriging(regr=LinearRegression(), corr=Gaussian()).fit(X, y)
