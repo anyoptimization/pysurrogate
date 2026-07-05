@@ -321,6 +321,80 @@ class Exp(Profile):
         return np.exp(-s)
 
 
+class RationalQuadraticProfile(Profile):
+    """Rational-quadratic profile ``f(s) = (1 + s/alpha)**(-alpha)`` of a *squared* metric ``s``.
+
+    A scale-mixture of Gaussians (heavier tails for small ``alpha``; ``alpha -> inf`` recovers the
+    Gaussian :class:`Exp`). Composed over :class:`WeightedSquare` this is the isotropic/ARD radial
+    Rational Quadratic -- but because it is a *profile*, it rides any squared metric, so
+    ``ComposedKernel(ProjectedSquare(A), RationalQuadraticProfile())`` is a Rational Quadratic under
+    a rotated (Mahalanobis) metric and ``ComposedKernel(SquareThenMix(w2), ...)`` a reduced (KPLS)
+    one -- kernels the separable :class:`RationalQuadratic` product form cannot express.
+
+    ``alpha`` is a fixed shape parameter (kept off the search vector, like :class:`RationalQuadratic`);
+    tuning it on a small sample overfits.
+
+    Args:
+        alpha: Tail / scale-mixture parameter (> 0). Default ``0.25`` (heavy, robust tails).
+    """
+
+    def __init__(self, alpha=0.25):
+        self.alpha = float(alpha)
+
+    def f(self, s):
+        return (1.0 + s / self.alpha) ** (-self.alpha)
+
+    def fprime(self, s):
+        # d/ds (1 + s/alpha)^(-alpha) = -alpha * (1/alpha) * (1 + s/alpha)^(-alpha-1)
+        return -((1.0 + s / self.alpha) ** (-self.alpha - 1.0))
+
+    def __repr__(self):
+        return f"RationalQuadraticProfile(alpha={self.alpha})"
+
+
+class MaternProfile(Profile):
+    """Matern profile of a *squared* metric ``s`` (the radius is ``r = sqrt(s)``), ``nu`` in {1.5, 2.5}.
+
+    ``nu`` sets smoothness (2.5 is twice-differentiable, a common physical default). Only the
+    differentiable half-integer cases are offered here: ``nu = 0.5`` (the exponential) has an
+    ``r``-cusp whose ``d/ds`` diverges at a coincident point, so it stays on the separable
+    :class:`Matern` product form instead.
+
+    Because it is a *profile*, it composes over any squared metric -- a genuinely rotated
+    (:class:`ProjectedSquare`) or reduced (:class:`SquareThenMix`) Matern, which the separable
+    product form cannot represent. The ``sqrt`` cancels out of ``d/ds`` (see below), so the
+    gradient is finite everywhere including ``s = 0``.
+
+    Args:
+        nu: Smoothness; one of 1.5 or 2.5.
+    """
+
+    def __init__(self, nu=2.5):
+        if nu not in (1.5, 2.5):
+            raise ValueError("MaternProfile supports nu in {1.5, 2.5}; use the Matern product kernel for nu=0.5.")
+        self.nu = nu
+
+    def f(self, s):
+        r = np.sqrt(np.maximum(s, 0.0))
+        if self.nu == 1.5:
+            c = np.sqrt(3.0)
+            return (1.0 + c * r) * np.exp(-c * r)
+        c = np.sqrt(5.0)
+        return (1.0 + c * r + (5.0 / 3.0) * s) * np.exp(-c * r)  # (5/3) r^2 = (5/3) s
+
+    def fprime(self, s):
+        # df/ds = (df/dr) / (2r); for these nu the leading r cancels, leaving a finite limit at s=0.
+        r = np.sqrt(np.maximum(s, 0.0))
+        if self.nu == 1.5:
+            c = np.sqrt(3.0)
+            return -1.5 * np.exp(-c * r)  # -(3/2) e^{-sqrt3 r}
+        c = np.sqrt(5.0)
+        return -(5.0 / 6.0) * (1.0 + c * r) * np.exp(-c * r)  # -(5/6)(1+sqrt5 r) e^{-sqrt5 r}
+
+    def __repr__(self):
+        return f"MaternProfile(nu={self.nu})"
+
+
 class ComposedKernel(Kernel):
     """A kernel ``k(D, theta) = f(s(D, theta))``: a :class:`Profile` composed with a :class:`Metric`.
 
