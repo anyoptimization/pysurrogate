@@ -1,13 +1,13 @@
 """Function-sampling study: benchmark surrogate models on a known function over a box domain."""
 
-import copy
-
 import numpy as np
 
+from pysurrogate.core.sampling import LHS, Random, Sampling
 from pysurrogate.dace import Exponential, Gaussian, Matern, RationalQuadratic
-from pysurrogate.models import KNN, RBF, SVR, InverseDistanceWeighting, Kriging, SimpleMean
+from pysurrogate.models import KNN, KPLS, RBF, SVR, InverseDistanceWeighting, Kriging, SimpleMean
+from pysurrogate.selection.benchmark import FunctionBenchmark, score
 from pysurrogate.selection.factory import as_named, cartesian
-from pysurrogate.selection.metrics import POINT_METRICS, evaluate, metric_sort_key
+from pysurrogate.selection.metrics import POINT, POINT_METRICS, metric_names, metric_sort_key
 
 
 def default_kriging():
@@ -18,8 +18,13 @@ def default_kriging():
     :func:`default_models`, whose Mean/KNN/IDW/SVR/RBF baselines report no ``sigma``. Kernels:
     Gaussian, Exponential, the Matern family (nu=1.5/2.5; nu=0.5 equals Exponential), and
     Rational-Quadratic swept over alpha (heavier tails as alpha shrinks).
+
+    Two :class:`~pysurrogate.models.kpls.KPLS` variants are included so cross-validation can pick
+    the PLS-reduced Kriging on high-dimensional problems (where full ARD becomes ill-posed); on
+    low-dimensional data they simply lose the ranking, at negligible cost thanks to KPLS's small
+    Adam theta search.
     """
-    return cartesian(
+    fleet = cartesian(
         Kriging,
         corr={
             "gauss": Gaussian(),
@@ -28,6 +33,9 @@ def default_kriging():
             **{f"rq[{a}]": RationalQuadratic(a) for a in (0.1, 0.25, 0.5, 1.0)},
         },
     )
+    fleet["KPLS[2]"] = KPLS(n_pls=2)
+    fleet["KPLS[3]"] = KPLS(n_pls=3)
+    return fleet
 
 
 def default_models():
@@ -46,33 +54,6 @@ def default_models():
         "RBF[mq]": RBF(kernel="mq", tail="linear"),
         **default_kriging(),
     }
-
-
-def _sample(n, xl, xu, rng, method):
-    """Draw ``n`` points in the box ``[xl, xu]`` (``"lhs"`` Latin hypercube or ``"random"``)."""
-    xl, xu = np.asarray(xl, dtype=float), np.asarray(xu, dtype=float)
-    d = len(xl)
-    if method == "random":
-        unit = rng.random((n, d))
-    else:  # latin hypercube — one point per stratum per dimension
-        unit = np.empty((n, d))
-        edges = np.linspace(0, 1, n + 1)
-        for j in range(d):
-            unit[:, j] = rng.permutation(edges[:n] + rng.random(n) * (edges[1] - edges[0]))
-    return xl + unit * (xu - xl)
-
-
-def _predict_with_sigma(model, X):
-    """Predict means and, if the model exposes it, predictive sigma; else ``(y_hat, None)``."""
-    try:
-        pred = model.predict(X, var=True)
-        y_hat = np.asarray(pred.y).flatten()
-        sigma = np.asarray(pred.sigma).flatten() if pred.sigma is not None else None
-        if sigma is not None and not np.all(np.isfinite(sigma)):
-            sigma = None
-        return y_hat, sigma
-    except Exception:
-        return np.asarray(model.predict(X).y).flatten(), None
 
 
 class StudyResult:
@@ -118,11 +99,17 @@ class StudyResult:
         ranks: dict = {n: [] for n in names}
         for metric in self.metrics():
             means = self.mean(metric)
-            # shared direction logic with Benchmark: smaller key = better (target- and direction-aware)
-            order = sorted(names, key=lambda n: metric_sort_key(metric, means[n]))
+            # rank each metric ONLY over models that produced a finite value for it. A model that
+            # cannot compute a metric (e.g. a sigma-less baseline on a calibration metric -> NaN)
+            # is simply not ranked on it, instead of being forced to last place -- otherwise the
+            # inability to emit uncertainty would inflate its mean rank purely as an artifact.
+            # shared direction logic with Benchmark: smaller key = better (target- and direction-aware).
+            rankable = [n for n in names if np.isfinite(means[n])]
+            order = sorted(rankable, key=lambda n: metric_sort_key(metric, means[n]))
             for rank, n in enumerate(order):
                 ranks[n].append(rank)
-        avg = {n: float(np.mean(r)) if r else np.nan for n, r in ranks.items()}
+        # a model with no finite metric at all sorts last (inf); ties keep insertion order.
+        avg = {n: float(np.mean(r)) if r else np.inf for n, r in ranks.items()}
         return dict(sorted(avg.items(), key=lambda kv: kv[1]))
 
     def best(self):
@@ -184,31 +171,37 @@ def study(f, xl, xu, n, models=None, n_test=1000, repeats=11, noise=0.0, seed=1,
     xl, xu = np.asarray(xl, dtype=float), np.asarray(xu, dtype=float)
     dim = len(xl)
 
+    # one shared engine: FunctionBenchmark samples train/test from the box (core Sampling),
+    # labels with f (train-only noise), fits the fleet, and emits the tidy predictions frame.
+    method = LHS() if sampling == "lhs" else Random()
+    bench = FunctionBenchmark(
+        f,
+        xl,
+        xu,
+        protos,
+        train=Sampling(n, method),
+        valid=None,
+        test=Sampling(n_test, Random()),
+        replications=repeats,
+        random_state=seed,
+        noise=noise,
+    )
+    df = bench.run()
+
+    # reduce the frame to StudyResult's per-model, per-repeat metric distributions. Score the
+    # test rows of each replication independently so each repeat contributes one value per metric.
+    test_df = df[df["role"] == "test"]
+    has_sigma = bool(np.isfinite(test_df["sigma"]).any())
+    cols = metric_names() if has_sigma else metric_names(kind=POINT)
+
     raw: dict = {name: {} for name in protos}
-    failures = {name: 0 for name in protos}
-
-    for i in range(repeats):
-        rng = np.random.default_rng(seed + i)
-        X = _sample(n, xl, xu, rng, sampling)
-        y = np.asarray(f(X)).flatten()
-        if noise > 0:
-            y = y + rng.normal(0, noise, len(y))
-        X_test = _sample(n_test, xl, xu, rng, "random")
-        y_test = np.asarray(f(X_test)).flatten()
-
-        for name, proto in protos.items():
-            model = copy.deepcopy(proto)
-            try:
-                model.fit(X, y)
-                y_hat, sigma = _predict_with_sigma(model, X_test)
-                if not np.all(np.isfinite(y_hat)):
-                    raise ValueError("non-finite predictions")
-            except Exception:
-                failures[name] += 1
+    for _, rep_rows in test_df.groupby("rep", sort=True):
+        table = score(rep_rows, cols, by=["model"])
+        for name in protos:
+            if name not in table.index:
                 continue
-            for family in evaluate(y_test, y_hat, sigma=sigma).values():
-                for metric, value in family.items():
-                    raw[name].setdefault(metric, []).append(value)
+            for metric in cols:
+                raw[name].setdefault(metric, []).append(float(table.loc[name, metric]))
 
     meta = dict(n=n, repeats=repeats, n_test=n_test, dim=dim, noise=noise, sampling=sampling, seed=seed)
-    return StudyResult(raw, failures, meta)
+    return StudyResult(raw, dict(bench.failures), meta)

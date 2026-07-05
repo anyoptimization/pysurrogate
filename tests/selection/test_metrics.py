@@ -57,3 +57,15 @@ def test_evaluate_groups_by_family_and_gates_on_sigma():
 
     with_sigma = metrics.evaluate(y, y_hat, sigma=np.full(20, 0.05))
     assert "calibration" in with_sigma and "nlpd" in with_sigma["calibration"]
+
+
+def test_evaluate_explicit_names_drop_probabilistic_without_sigma():
+    # explicit names use the SAME computability predicate as the default path: a probabilistic
+    # metric without sigma is silently dropped, not raised on -- one consistent point of truth
+    rng = np.random.RandomState(1)
+    y = rng.random(15)
+    y_hat = y + rng.normal(0, 0.05, 15)
+    out = metrics.evaluate(y, y_hat, names=["rmse", "nlpd"])  # nlpd needs sigma, none given
+    families = {m for fam in out.values() for m in fam}
+    assert "rmse" in families
+    assert "nlpd" not in families  # dropped, not an error

@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 
 from pysurrogate.core.model import Model
-from pysurrogate.core.partitioning import CrossvalidationPartitioning
+from pysurrogate.core.partitioning import default_partitioning
 from pysurrogate.core.prediction import predictions_frame
 from pysurrogate.core.sampling import LHS, Random, Sampling
 from pysurrogate.selection.factory import as_named
@@ -49,9 +49,27 @@ class FunctionBenchmark:
         test: :class:`Sampling` for the test partition. Defaults to ``Sampling(2000, Random())``.
         replications: Number of independent re-draws of all partitions (the ``rep`` axis).
         random_state: Base RNG seed; replication ``r`` uses ``random_state + r``.
+        noise: Std-dev of Gaussian noise added to the *training* labels only (the held-out
+            roles keep the clean ground truth). ``0.0`` (default) trains on the exact function.
+        raise_exception: If ``True``, a model that fails to fit aborts the run; if ``False``
+            (default) the failure is counted in :attr:`failures` and that model is skipped for
+            the offending replication.
     """
 
-    def __init__(self, f, xl, xu, models, train=None, valid=None, test=None, replications=1, random_state=0):
+    def __init__(
+        self,
+        f,
+        xl,
+        xu,
+        models,
+        train=None,
+        valid=None,
+        test=None,
+        replications=1,
+        random_state=0,
+        noise=0.0,
+        raise_exception=False,
+    ):
         self.f = f
         self.xl = np.asarray(xl, dtype=float)
         self.xu = np.asarray(xu, dtype=float)
@@ -61,10 +79,14 @@ class FunctionBenchmark:
         self.test = test if test is not None else Sampling(2000, Random())
         self.replications = replications
         self.random_state = random_state
+        self.noise = noise
+        self.raise_exception = raise_exception
+        self.failures = {name: 0 for name in self.models}
 
     def run(self) -> pd.DataFrame:
         """Fit every model on every replication and return the tidy predictions DataFrame."""
         bounds = (self.xl, self.xu)
+        self.failures = {name: 0 for name in self.models}
         blocks = []
         for rep in range(self.replications):
             rng = np.random.default_rng(self.random_state + rep)
@@ -76,13 +98,26 @@ class FunctionBenchmark:
             data["test"] = self.test.sample(bounds, rng)
             data = {role: (X, np.asarray(self.f(X))) for role, X in data.items()}
 
+            # noisy observations, clean ground truth: perturb only the labels the model trains on
+            Xtr, ytr = data["train"]
+            ytr_fit = ytr + rng.normal(0.0, self.noise, size=ytr.shape) if self.noise > 0 else ytr
+
             for name, proto in self.models.items():
                 model = copy.deepcopy(proto)
-                Xtr, ytr = data["train"]
-                model.fit(Xtr, ytr)
+                try:
+                    model.fit(Xtr, ytr_fit)
+                except Exception:
+                    if self.raise_exception:
+                        raise
+                    self.failures[name] += 1
+                    continue
                 for role, (X, y) in data.items():
                     pred = model.predict(X, var=True)
                     blocks.append(predictions_frame(X, y, pred, rep=rep, model=name, role=role))
+        if not blocks:
+            # every model failed to fit on every replication -> nothing to concatenate. Raise a
+            # clear message instead of pandas' opaque "No objects to concatenate" from concat([]).
+            raise RuntimeError("no predictions produced: every model failed to fit on every replication.")
         return pd.concat(blocks, ignore_index=True)
 
 
@@ -159,31 +194,53 @@ class Benchmark:
         assert len(X) == len(y)
 
         if partitions is None:
-            partitioning = self.partitioning or CrossvalidationPartitioning(k_folds=3, seed=1)
+            # 3-fold (not the canonical 5) on purpose: model-SELECTION screens many candidates, so
+            # the cheaper, lower-variance-budget 3-fold is the deliberate speed trade-off here.
+            partitioning = self.partitioning or default_partitioning(k_folds=3, seed=1)
             partitions = partitioning.do(len(X))
+
+        # probabilistic metrics (nlpd, crps, calibration) need the predictive sigma, so ask the
+        # model for the variance whenever any requested metric is probabilistic -- point-only metric
+        # sets keep the cheaper mean-only predict.
+        need_sigma = any(get_metric(m).kind == PROBABILISTIC for m in self.metrics)
 
         records = {}
         for name, proto in self.models.items():
             per_metric: dict = {m: [] for m in self.metrics}
             n_success = 0
+            fitted = None  # last successfully fitted fold model (used by AutoModel(refit_best=False))
             for split in partitions:
                 trn, tst = split.train, split.test
                 try:
                     model = copy.deepcopy(proto)
                     model.fit(X[trn], y[trn], optimize=optimize)
-                    y_hat = model.predict(X[tst]).y[:, 0]
-                    for m in self.metrics:
-                        per_metric[m].append(calc_metric(m, y[tst], y_hat))
+                    pred = model.predict(X[tst], var=need_sigma)
+                    y_hat = pred.y[:, 0]
+                    fitted = model
+                    # a backend with no predictive variance (SVR, mean, ...) returns sigma=None;
+                    # probabilistic metrics then score NaN for it (skipped), not crash the model.
+                    sigma = pred.sigma[:, 0] if (need_sigma and pred.sigma is not None) else None
                     n_success += 1
                 except Exception:
                     if self.raise_exception:
                         raise
                     for m in self.metrics:
                         per_metric[m].append(np.nan)
+                    continue
+                # score each metric independently: a probabilistic metric on a no-sigma model
+                # fails only that metric, leaving the model's point metrics intact.
+                for m in self.metrics:
+                    try:
+                        per_metric[m].append(calc_metric(m, y[tst], y_hat, sigma=sigma))
+                    except Exception:
+                        if self.raise_exception:
+                            raise
+                        per_metric[m].append(np.nan)
 
             records[name] = dict(
                 label=name,
                 proto=proto,
+                fitted=fitted,
                 n_runs=len(partitions),
                 n_success=n_success,
                 success=n_success > 0,
@@ -252,19 +309,34 @@ class AutoModel(Model):
         partitioning: Cross-validation scheme; ``None`` uses the :class:`Benchmark` default.
     """
 
-    def __init__(self, models=None, sorted_by="mae", refit_best=True, partitioning=None):
-        super().__init__()
+    def __init__(self, models=None, sorted_by="mae", refit_best=True, partitioning=None, **kwargs):
+        # forward Model lifecycle options (norm_X/norm_y, active_dims, filtering, ...) to the base
+        # so AutoModel is configured like any other Model -- the lifecycle genuinely runs.
+        super().__init__(**kwargs)
         if models is None:
             from pysurrogate.selection.study import default_models
 
             models = default_models()
-        self.benchmark = models if isinstance(models, Benchmark) else Benchmark(models, partitioning=partitioning)
+        if isinstance(models, Benchmark):
+            self.benchmark = models
+        else:
+            # ensure the selection metric is actually computed: the point-metric default omits the
+            # probabilistic ones (crps/nlpd/calib), so selecting by one of those needs it added to
+            # the benchmark's metric set -- otherwise `sorted_by` has nothing to rank on.
+            metrics = list(POINT_METRICS)
+            if sorted_by not in metrics:
+                metrics.append(sorted_by)
+            self.benchmark = Benchmark(models, metrics=metrics, partitioning=partitioning)
         self.sorted_by = sorted_by
         self.refit_best = refit_best
         self.best = None
         self.ranking = None
 
-    def do(self, X, y, optimize=True):
+    def _fit(self, X, y, optimize=True, **kwargs):
+        # a genuine Model hook: the public Model.fit has already promoted, normalized, filtered
+        # and de-duplicated (X, y), so the benchmark and the winner all see the same prepared data
+        # and the Model lifecycle owns pre/postprocess. We run the cross-validated benchmark, pick
+        # the winner by `sorted_by`, and store the winner *fitted on the full data* as self.model.
         self.benchmark.do(X, y, optimize=optimize)
         ranking = self.benchmark.results(sorted_by=self.sorted_by, only_successful=True)
         if not ranking:
@@ -274,21 +346,23 @@ class AutoModel(Model):
         self.best = ranking[0]
 
         if self.refit_best:
-            model = copy.deepcopy(self.best["proto"])
-            model.fit(X, y, optimize=optimize)
+            # refit the winning prototype on the FULL data set (the common case).
+            winner = copy.deepcopy(self.best["proto"])
+            winner.fit(X, y, optimize=optimize)
         else:
+            # keep the winner's fold fit -- only well-defined for a single-partition benchmark,
+            # where that one fitted model was trained on (essentially) all the data.
             if self.best["n_runs"] > 1:
                 raise RuntimeError("refit_best=False needs a single-partition benchmark (n_runs == 1).")
-            model = copy.deepcopy(self.best["proto"]).fit(X, y, optimize=optimize)
+            winner = self.best["fitted"]
+            if winner is None:
+                raise RuntimeError("refit_best=False but the winner has no retained fold fit.")
+        self.model = winner
 
-        self.model = model
-        return model
-
-    def fit(self, X, y, optimize=True, **kwargs):
-        self.do(X, y, optimize=optimize)
-        self.has_been_fitted = True
-        self.success = True
-        return self
+    def _predict(self, X, var=False, grad=False):
+        # delegate to the chosen winner; Model.predict wraps this with the shared postprocess
+        # (un-normalization) and the failed-fit guard, so AutoModel needs no bespoke predict.
+        return self.model.predict(X, var=var, grad=grad)
 
     def refit(self, X, y, optimize=True):
         """Refit the *selected* winner on new data -- it does **not** re-select.
@@ -321,14 +395,11 @@ class AutoModel(Model):
             raise Exception("refit() requires a prior fit(); call fit() first.")
         return self.model.refit(X, y, optimize=optimize)  # winner records its own prequential log
 
-    def records(self):
-        """Return the winner's prequential validation log (see :meth:`Model.records`)."""
+    def history(self):
+        """Return the winner's prequential validation log (see :meth:`Model.history`)."""
         import pandas as pd  # type: ignore[import-untyped]
 
-        return pd.DataFrame() if self.model is None else self.model.records()
-
-    def predict(self, X, var=False, grad=False):
-        return self.model.predict(X, var=var, grad=grad)
+        return pd.DataFrame() if self.model is None else self.model.history()
 
     def statistics(self):
         """Return a ``{model_name: score}`` dict of the ranking metric, best first."""

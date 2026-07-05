@@ -37,8 +37,7 @@ class PatternSearch(Optimizer):
     def _setup(self):
         # hard bounds clip the moves (may be +/-inf); the finite sampling region sets the step
         # scale and the center fallback, since an infinite box has no width or midpoint.
-        lo, hi = (np.atleast_1d(np.asarray(b, float)) for b in self.problem.bounds)
-        slo, shi = (np.atleast_1d(np.asarray(b, float)) for b in self.problem.sampling_bounds)
+        lo, hi, slo, shi = self._box()
         self._lo, self._hi, self._width, self._p = lo, hi, shi - slo, len(lo)
         # no warm start -> begin at the sampling-region center (this is a local search; it needs a point)
         self._x = 0.5 * (slo + shi) if self.x0 is None else np.clip(self.x0, lo, hi)

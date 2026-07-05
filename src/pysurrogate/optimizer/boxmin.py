@@ -22,7 +22,8 @@ class Boxmin(Optimizer):
     step updates all match Boxmin exactly; the only difference is additive-in-coordinate vs
     multiplicative-in-theta, which the log transform makes identical. Every evaluated candidate is
     reported to the callback (which owns selection); the full visited trajectory is kept on
-    ``self.visited`` for inspection (e.g. the golden theta-trajectory snapshots).
+    the contract attribute ``self.visited`` (declared and reset on the :class:`Optimizer` base)
+    for inspection (e.g. the golden theta-trajectory snapshots).
     """
 
     requires_x0 = True  # a pattern search needs a starting point (the warm theta)
@@ -40,7 +41,7 @@ class Boxmin(Optimizer):
         x[eq] = hi[eq]
         self._s = s
         self._ne = np.flatnonzero(s != 0.0)  # coordinates that are actually searched
-        self.visited = []
+        # self.visited is reset by Optimizer.setup() before this hook runs; we just append to it.
         # relocate the start toward the upper bound until R is positive-definite (Boxmin's _start
         # relocation); the climb probes are feasibility-only and are not part of the trajectory.
         x = self._relocate(x)

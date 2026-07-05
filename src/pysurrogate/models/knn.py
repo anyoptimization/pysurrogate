@@ -8,7 +8,17 @@ from pysurrogate.util.dist import calc_dist
 
 
 class KNN(Model):
-    """Predicts each point as the inverse-distance-weighted mean of its ``n_nearest`` neighbors."""
+    """Predicts each point as a distance-weighted mean of its ``n_nearest`` neighbors.
+
+    Weights are ``1 / d**p`` where ``d`` is the **squared** Euclidean distance (the model layer's
+    :func:`~pysurrogate.util.dist.calc_dist`). So the effective exponent on the *true* distance is
+    ``2p`` -- note this differs from :class:`~pysurrogate.models.idw.InverseDistanceWeighting`,
+    whose ``p`` is the exponent on the true (un-squared) distance.
+
+    Args:
+        n_nearest: Number of nearest neighbors averaged for each query point.
+        p: Exponent applied to the squared distance in the inverse-distance weights.
+    """
 
     def __init__(self, n_nearest=10, p=2.0, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -28,13 +38,18 @@ class KNN(Model):
         w = 1 / d
         w = w / w.sum(axis=1)[:, None]
 
-        neighbors = np.take_along_axis(self.y, idx, axis=0)
-        y = (w * neighbors).sum(axis=1)
+        # neighbors: (m, k, q) via fancy indexing -- works for any number of outputs q (a plain
+        # take_along_axis only lined up for q == 1). Weights broadcast over the output axis.
+        neighbors = self.y[idx]  # (m, k, q)
+        wk = w[:, :, None]  # (m, k, 1)
+        y = (wk * neighbors).sum(axis=1)  # (m, q)
 
         # local uncertainty = the inverse-distance-weighted variance of the k neighbor targets
-        # about the weighted mean, reusing the same weights. grad/var_grad stay None.
+        # about the weighted mean, reusing the same weights. Collapsed to one shared value per
+        # point (mean over outputs) to match the shared-variance Prediction contract. grad stays None.
         v = None
         if var:
-            v = (w * (neighbors - y[:, None]) ** 2).sum(axis=1)[:, None]
+            per_output = (wk * (neighbors - y[:, None, :]) ** 2).sum(axis=1)  # (m, q)
+            v = per_output.mean(axis=1, keepdims=True)  # (m, 1)
 
-        return Prediction(y=y[:, None], var=v)
+        return Prediction(y=y, var=v)

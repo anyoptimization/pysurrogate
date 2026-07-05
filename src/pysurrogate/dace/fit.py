@@ -135,7 +135,7 @@ def _cholesky_batch(R):
         return feasible, C
 
 
-def batch_obj_grad(X, Y, regr, kernel, thetas, noise=0.0, with_grad=True, noise_grad=False):
+def batch_obj_grad(X, Y, regr, kernel, thetas, noise=0.0, with_grad=True, noise_grad=False, D=None):
     """Objective and theta-gradient of the Dace likelihood for a population of theta.
 
     The batched, lock-step counterpart of a loop over ``fit``: it builds the stacked
@@ -166,6 +166,10 @@ def batch_obj_grad(X, Y, regr, kernel, thetas, noise=0.0, with_grad=True, noise_
             This is what lets an optimizer treat the noise as just another coordinate of the
             search vector. Implies the gradient block (requires ``with_grad``); the extra cost
             is one trace per candidate since ``Rinv`` and ``gamma`` are already formed.
+        D: Optional precomputed componentwise differences ``(n*n, d)`` of ``X`` in the kernel
+            layout. The differences are theta-independent, so a theta search builds them once and
+            passes the same array to every evaluation -- avoiding the per-call rebuild and letting
+            a reducing kernel (KPLS) cache its distance projection. ``None`` rebuilds them here.
 
     Returns:
         ``(obj, grad, feasible)`` -- objectives ``(J,)`` (``inf`` where infeasible),
@@ -195,7 +199,7 @@ def batch_obj_grad(X, Y, regr, kernel, thetas, noise=0.0, with_grad=True, noise_
     # noise may be a scalar (same nugget for all) or a per-candidate (J,) array; reshape so
     # it broadcasts onto the (J, n, n) stack as a diagonal add.
     diag = (base + np.asarray(noise, dtype=float)).reshape(-1, 1, 1)
-    R = calc_kernel_tensor(X, X, kernel, thetas) + np.eye(n) * diag
+    R = calc_kernel_tensor(X, X, kernel, thetas, D=D) + np.eye(n) * diag
 
     feasible, C = _cholesky_batch(R)
     idx = np.flatnonzero(feasible)
@@ -214,6 +218,16 @@ def batch_obj_grad(X, Y, regr, kernel, thetas, noise=0.0, with_grad=True, noise_
     # solve; the GLS below mirrors fit() but stacked over the population.
     Ft = np.linalg.solve(C, Fb)
     Q, G = np.linalg.qr(Ft)
+    # guard the trend design like fit() does: a rank-deficient F (collinear/degenerate design
+    # sites with p <= n, so the regr(X).shape[1] > n check above does not catch it) makes G
+    # near-singular. The batched np.linalg.solve(G, ...) below would then raise LinAlgError and
+    # kill the WHOLE batch -- violating DaceProblem's never-raise contract. Mark those slices
+    # infeasible and neutralize G to a well-conditioned identity so the batched solve stays
+    # finite; their objective is forced to inf below (a nugget regularizes R, not F).
+    with np.errstate(divide="ignore"):
+        g_ok = (1.0 / np.linalg.cond(G)) >= 1e-15  # (m,) reciprocal condition number per slice
+    if not g_ok.all():
+        G = np.where(g_ok[:, None, None], G, np.eye(G.shape[-1]))
     Yt = np.linalg.solve(C, Yb)
     beta = np.linalg.solve(G, np.swapaxes(Q, 1, 2) @ Yt)
     rho = Yt - Ft @ beta
@@ -222,6 +236,7 @@ def batch_obj_grad(X, Y, regr, kernel, thetas, noise=0.0, with_grad=True, noise_
     detR = np.prod(np.diagonal(C, axis1=1, axis2=2) ** (2.0 / n), axis=1)  # (m,)
     s = np.sum(sigma2, axis=1)  # (m,)
     obj[idx] = s * detR
+    obj[idx[~g_ok]] = np.inf  # ill-conditioned trend design -> infeasible (the bad block below drops it)
 
     if with_grad:
         # gradient: df/d(theta_k) = (detR/n) * (s * tr(Rinv Rk) - sum_q g^T Rk g).
@@ -240,7 +255,10 @@ def batch_obj_grad(X, Y, regr, kernel, thetas, noise=0.0, with_grad=True, noise_
             gamma_sq = np.sum(gamma**2, axis=(1, 2))  # sum over n and q, (m,)
             dnoise[idx] = (detR / n) * (s * tr_Rinv - gamma_sq)
 
-        D = np.repeat(X, n, axis=0) - np.tile(X, (n, 1))  # (n*n, d), the kernel-matrix layout
+        # (n*n, d), the kernel-matrix layout -- reuse the caller's precomputed differences when
+        # given (one array shared across the whole theta search) instead of rebuilding them here.
+        if D is None:
+            D = np.repeat(X, n, axis=0) - np.tile(X, (n, 1))
         # Loop over the (small) population rather than pre-stacking a single (m, n, n, p)
         # derivative tensor -- that tensor grows as m*n^2*p (tens of MB by n=120) and the
         # allocation/cache traffic, not the FLOPs, was the cost. Each member touches only

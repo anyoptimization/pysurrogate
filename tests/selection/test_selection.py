@@ -1,9 +1,11 @@
 """Tests for the selection layer: factory, benchmark ranking, and model selection."""
 
 import numpy as np
+import pytest
 
-from pysurrogate.models import RBF, SVR, SimpleMean
+from pysurrogate.models import RBF, SVR, Kriging, SimpleMean
 from pysurrogate.selection import AutoModel, Benchmark, cartesian
+from pysurrogate.selection.metrics import metric_names
 
 
 def _data(n=60, seed=0):
@@ -43,6 +45,48 @@ def test_benchmark_records_per_fold_runs():
     rec = bench.records["rbf"]
     assert rec["n_runs"] == 3 and rec["n_success"] == 3
     assert rec["performance"]["mae"]["values"].shape == (3,)
+
+
+def test_benchmark_scores_probabilistic_metrics_with_sigma():
+    """A probabilistic metric (needs sigma) must be scored, not silently NaN'd.
+
+    Regression guard: ``Benchmark`` predicted mean-only and never passed ``sigma`` to the metric,
+    so every calibration metric raised "requires sigma" and collapsed the whole benchmark. It must
+    now request the variance and pass it through.
+    """
+    X, y = _data()
+    bench = Benchmark({"kriging": Kriging()}, metrics=["rmse", "nlpd", "calib"]).do(X, y)
+    perf = bench.records["kriging"]["performance"]
+    assert np.isfinite(perf["nlpd"]["mean"])  # actually computed, not NaN
+    assert np.isfinite(perf["calib"]["mean"])
+
+
+def test_benchmark_probabilistic_metric_skips_models_without_sigma():
+    """A no-sigma model (SVR) scores NaN on a probabilistic metric but keeps its point metrics."""
+    X, y = _data()
+    bench = Benchmark({"svr": SVR()}, metrics=["rmse", "nlpd"]).do(X, y)
+    perf = bench.records["svr"]["performance"]
+    assert np.isfinite(perf["rmse"]["mean"])  # point metric still works
+    assert np.isnan(perf["nlpd"]["mean"])  # probabilistic metric skipped, model not crashed
+
+
+# Every registered metric must be computable through the whole selection stack -- the coverage gap
+# that let the "Benchmark never passes sigma" and "AutoModel never computes the sorted_by metric"
+# bugs through. Parametrizing over the live registry means a new metric is auto-covered.
+@pytest.mark.parametrize("metric", metric_names())
+def test_benchmark_computes_every_registered_metric(metric):
+    X, y = _data()
+    # Kriging provides sigma, so even probabilistic metrics resolve to a finite score.
+    bench = Benchmark({"kriging": Kriging()}, metrics=[metric]).do(X, y)
+    assert np.isfinite(bench.records["kriging"]["performance"][metric]["mean"])
+
+
+@pytest.mark.parametrize("metric", metric_names())
+def test_automodel_selects_by_every_registered_metric(metric):
+    X, y = _data()
+    auto = AutoModel(models={"kriging": Kriging(), "rbf": RBF(kernel="gaussian")}, sorted_by=metric).fit(X, y)
+    assert auto.success
+    assert list(auto.statistics())  # a winner was actually chosen by this metric
 
 
 def test_model_selection_picks_and_refits_best():

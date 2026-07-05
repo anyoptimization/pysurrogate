@@ -214,6 +214,19 @@ def test_adam_requires_gradient():
         Adam(steps=1).minimize(Sphere(dim=2, grad=False))
 
 
+def test_adam_fails_fast_in_setup_not_mid_search():
+    # the gradient requirement is detected up front (in setup, like requires_x0), before any
+    # _advance runs -- so the error surfaces from setup(), not after a partial search
+    opt = Adam(steps=5)
+    with pytest.raises(ValueError, match="analytic gradient"):
+        opt.setup(Sphere(dim=2, grad=False))
+
+
+def test_problem_has_grad_property():
+    assert Sphere(dim=2, grad=True).has_grad is True
+    assert Sphere(dim=2, grad=False).has_grad is False
+
+
 # --- Restart: multi-start over any inner, with optional screen ---------------------------
 
 
@@ -261,3 +274,34 @@ def test_infeasible_everywhere_yields_no_pick():
 
     res = PatternSearch().minimize(Empty())
     assert res.x is None  # nothing feasible was ever selected
+
+
+def test_visited_is_a_contract_attribute_present_on_every_optimizer():
+    # `visited` is declared on the Optimizer base, so it is present (empty) before setup and
+    # after a run on strategies that keep no trajectory -- never absent, no getattr needed.
+    for opt in (LBFGS(), PatternSearch(), Adam()):
+        assert opt.visited == []
+    res_opt = LBFGS()
+    res_opt.minimize(Sphere(dim=2))
+    assert isinstance(res_opt.visited, list)  # still a list (empty) after a run
+
+
+def test_boxmin_populates_the_visited_trajectory():
+    from pysurrogate.optimizer import Boxmin
+
+    box = Boxmin()
+    box.minimize(Sphere(dim=2, center=[1.0, -1.0]), x0=np.array([0.5, 0.5]))
+    # a pattern search records its trajectory on the shared contract attribute
+    assert len(box.visited) > 1
+    assert all(isinstance(x, np.ndarray) for x in box.visited)
+
+
+def test_setup_resets_visited_between_runs():
+    from pysurrogate.optimizer import Boxmin
+
+    box = Boxmin()
+    box.minimize(Sphere(dim=2), x0=np.array([0.5, 0.5]))
+    first = len(box.visited)
+    assert first > 0
+    box.minimize(Sphere(dim=2), x0=np.array([0.5, 0.5]))  # fresh setup() must reset, not accumulate
+    assert len(box.visited) == first  # deterministic run -> identical trajectory length, not doubled

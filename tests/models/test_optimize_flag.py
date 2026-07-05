@@ -3,6 +3,7 @@
 import copy
 
 import numpy as np
+import pytest
 
 from pysurrogate.core.sampling import LHS, Sampling
 from pysurrogate.dace import Gaussian, Matern
@@ -64,16 +65,15 @@ def test_kriging_refit_optimize_false_freezes_theta():
     assert m.model.model["X"].shape[0] == 70  # but data grew
 
 
-def test_refit_returns_out_of_sample_prediction():
-    # refit scores the new points on the OLD model (prequential validation) and returns it,
-    # then appends them -- the returned prediction equals predicting them pre-refit
+def test_refit_returns_out_of_sample_score():
+    # refit scores the new points on the OLD model (prequential validation) and returns that score,
+    # then appends them -- the score equals validate() on those points before adding
     X, y, _ = _data()
     m = Kriging(corr=Gaussian())
     m.fit(X[:50], y[:50])
-    expected = m.predict(X[50:60], var=True)  # OOS on the 50-point model, before adding
-    oos = m.refit(X[50:60], y[50:60])
-    np.testing.assert_allclose(oos.y, expected.y)  # same model scored the unseen points
-    np.testing.assert_allclose(oos.sigma, expected.sigma)
+    expected = m.validate(X[50:60], y[50:60])  # OOS score on the 50-point model, before adding
+    score = m.refit(X[50:60], y[50:60])
+    assert score["rmse"] == pytest.approx(expected["rmse"])  # same model scored the unseen points
     assert m.model.model["X"].shape[0] == 60  # points appended afterward
 
 
@@ -82,11 +82,11 @@ def test_refit_accumulates_records_with_epoch():
     X, y, _ = _data()
     m = Kriging(corr=Gaussian())
     m.fit(X[:40], y[:40])
-    assert m.records().empty  # an empty DataFrame before any refit
+    assert m.history().empty  # an empty DataFrame before any refit
     for step in range(3):
         s = 40 + step * 8
         m.refit(X[s : s + 8], y[s : s + 8])
-    df = m.records()
+    df = m.history()
     assert set(df["epoch"]) == {0, 1, 2}  # one epoch per refit
     assert len(df) == 24  # 3 epochs * 8 points
     for col in ["epoch", "i", "output", "y_true", "y", "var", "sigma"]:

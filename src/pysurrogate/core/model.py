@@ -62,6 +62,10 @@ class Model:
         self._validation = None
         self._epoch = 0
 
+        # scalar multiplier applied to the predictive variance, set by calibrate(apply=True). 1.0 is
+        # the identity (uncalibrated); a fresh fit resets it.
+        self._calibration = 1.0
+
     def preprocess(self, X, y, **kwargs):
         if self.active_dims is not None:
             X = X[:, self.active_dims]
@@ -90,12 +94,14 @@ class Model:
         # norms make every factor 1.
         if var is not None or grad is not None or var_grad is not None:
             s_y, s_X = self.norm_y.scale(), self.norm_X.scale()
+            # the calibration scale (calibrate()) multiplies the variance and its gradient -- 1.0
+            # until calibrated, so an uncalibrated model is untouched. The mean gradient is unscaled.
             if var is not None:
-                var = var * s_y**2
+                var = var * s_y**2 * self._calibration
             if grad is not None:
                 grad = grad * s_y / s_X
             if var_grad is not None:
-                var_grad = var_grad * s_y**2 / s_X
+                var_grad = var_grad * s_y**2 / s_X * self._calibration
 
         pred = Prediction(y=y, var=var, grad=grad, var_grad=var_grad)
         return self._postprocess(pred)
@@ -118,6 +124,13 @@ class Model:
         assert len(X) == len(y)
         self._X, self._y = X, y
 
+        # a fresh fit invalidates any prior variance calibration -- reset to the identity.
+        self._calibration = 1.0
+        # drop any statistics a data-fitted normalization estimated on a previous fit, so this fit
+        # (e.g. the refit lifecycle on grown data) re-estimates from the current data instead of
+        # reusing stale train statistics. No-op for the identity/user-fixed transforms.
+        self.norm_X.reset()
+        self.norm_y.reset()
         self.X, self.y = self.preprocess(X, y)
 
         start = time.time()
@@ -135,28 +148,29 @@ class Model:
         self.time = time.time() - start
         return self
 
-    def refit(self, X, y, optimize=True):
-        """Score the new points out-of-sample, then append them and re-fit.
+    def refit(self, X, y, optimize=True, metrics=None):
+        """Score the new points out-of-sample, then append them and re-fit -- ``validate`` + absorb.
 
-        The new points are first predicted by the **current** model -- which has not seen them --
-        and that out-of-sample :class:`~pysurrogate.core.prediction.Prediction` is **returned**.
-        This is prequential validation: in an online/refit loop, scoring each batch on the
-        model-before-it-saw-them is honest held-out generalization with no leakage, exactly the
-        record to collect. Only after scoring are the points appended and the model re-fit.
+        The new points are first predicted by the **current** model -- which has not seen them -- and
+        that out-of-sample prediction is scored and **returned** as a multi-metric ``{metric: value}``
+        dict (exactly what :meth:`validate` returns). ``refit`` additionally logs the full prediction
+        (see :meth:`history`) and then absorbs the points. Prequential validation: scoring each batch
+        on the model-before-it-saw-them is honest held-out generalization with no leakage.
 
-        Generic behavior stacks the new ``(X, y)`` onto the data the model was last fit on and
-        re-fits; ``optimize`` is forwarded to :meth:`fit`. Backends with a warm start (e.g. Kriging)
-        override the re-fit step for an incremental update; the base re-fits fresh.
+        The absorb step delegates to :meth:`_refit`; ``optimize`` is forwarded. Backends with a warm
+        start (e.g. Kriging) override :meth:`_refit` for an incremental update; the base re-fits fresh.
 
         Args:
-            X: The new input points to add (only the additions, not the full set).
+            X: The new input points to add -- **only the additions, not the full set**.
             y: The targets for the new points.
-            optimize: Forwarded to :meth:`fit` (``True`` tunes hyperparameters, ``False`` the cheap
+            optimize: Forwarded to the re-fit (``True`` tunes hyperparameters, ``False`` the cheap
                 fixed-hyperparameter fit).
+            metrics: Restrict the returned score to these metric names (default: all computable ones),
+                matching :meth:`validate`.
 
         Returns:
-            The out-of-sample :class:`~pysurrogate.core.prediction.Prediction` of ``X`` from the
-            model *before* the new points were added (collect it against ``y`` to validate).
+            The out-of-sample multi-metric score of the new points -- the same ``{metric: value}``
+            :meth:`validate` would return on them *before* the model saw them.
 
         Raises:
             Exception: If called before a successful :meth:`fit`.
@@ -164,13 +178,93 @@ class Model:
         if not self.has_been_fitted or self._X is None:
             raise Exception("refit() requires a prior fit(); call fit() first.")
         out_of_sample = self.predict(X, var=True)  # the OLD model scores the unseen points
-        self._record(X, y, out_of_sample)
+        self._record(X, y, out_of_sample)  # keep the full prediction for history()
+        score = self._score(at_least2d(y, expand="c"), out_of_sample, metrics)
+        self._refit(X, y, optimize=optimize)
+        return score
+
+    def _refit(self, X, y, optimize=True):
+        """Re-fit hook: absorb the new points and update the fitted model.
+
+        The base stacks the new ``(X, y)`` onto the data the model was last fit on and re-fits from
+        scratch via :meth:`fit`. Backends with an incremental / warm-started update (e.g. Kriging via
+        the Dace engine) override just this step to append cheaply; the generic :meth:`refit`
+        (out-of-sample scoring + record) stays shared.
+        """
         X = np.vstack([self._X, at_least2d(X, expand="r")])
         y = np.vstack([self._y, at_least2d(y, expand="c")])
         self.fit(X, y, optimize=optimize)
-        return out_of_sample
 
-    def records(self):
+    def validate(self, X, y, metrics=None):
+        """Score points against the current model across the metric registry -- a multi-metric score.
+
+        Predicts ``X`` and evaluates it against ``y`` over every applicable metric (calibration
+        metrics included when the model has a predictive variance), returning a ``{metric: value}``
+        dict -- so you pick the metric *after* the fact instead of committing to one up front. When
+        ``X`` is data the model has not seen -- e.g. the new points in :meth:`refit` -- this is a
+        genuine out-of-sample (prequential) score. Generic: just ``predict`` + the metrics registry.
+
+        Args:
+            X: Points to score, shape ``(m, d)``.
+            y: Their targets, shape ``(m,)`` or ``(m, q)``.
+            metrics: Restrict to these metric names (default: all computable ones).
+
+        Returns:
+            ``{metric_name: value}`` over the registry metrics -- e.g. ``score["rmse"]``,
+            ``score["nlpd"]``.
+
+        Raises:
+            Exception: If called before a successful :meth:`fit`.
+        """
+        if not self.has_been_fitted:
+            raise Exception("validate() requires a fitted model; call fit() first.")
+        pred = self.predict(X, var=True)
+        return self._score(at_least2d(y, expand="c"), pred, metrics)
+
+    @staticmethod
+    def _score(y, pred, metrics=None):
+        """Flatten :func:`~pysurrogate.selection.metrics.evaluate` into a ``{metric: value}`` score."""
+        from pysurrogate.selection.metrics import evaluate
+
+        families = evaluate(y, pred.y, sigma=pred.sigma, names=metrics)
+        return {name: value for family in families.values() for name, value in family.items()}
+
+    def calibrate(self, X, y, apply=True):
+        """Fit the predictive-variance scale on held-out ``(X, y)`` -- the sibling of :meth:`validate`.
+
+        Predicts ``X`` with the current model and fits the single scalar ``s = mean[(y - yhat)^2 / var]``
+        that makes the predictive variance match the observed errors on the held-out set. ``s > 1``
+        means the model was overconfident (errors larger than ``var`` implies), ``s < 1``
+        underconfident, ``1`` calibrated. Only the *variance* is rescaled; the mean is untouched, so
+        accuracy metrics do not change. Like :meth:`validate`, it takes an explicit held-out set --
+        it scores the *current* model, so there is no cross-validation or re-fitting.
+
+        Args:
+            X: Held-out points, shape ``(m, d)``.
+            y: Their targets, shape ``(m,)`` or ``(m, q)``.
+            apply: ``True`` (default) *keeps* the scale -- future ``predict(var=True)`` multiplies the
+                variance (and its gradient) by it; ``False`` just returns it without changing the model.
+
+        Returns:
+            The fitted variance scale ``s`` for this held-out set (relative to the current predictions).
+
+        Raises:
+            Exception: If called before a fit, or if the model has no predictive variance to scale.
+        """
+        if not self.has_been_fitted:
+            raise Exception("calibrate() requires a fitted model; call fit() first.")
+        pred = self.predict(X, var=True)
+        if pred.var is None:
+            raise Exception("model has no predictive variance to calibrate.")
+        resid2 = np.square(at_least2d(y, expand="c") - pred.y)
+        s = float(np.mean(resid2 / np.maximum(pred.var, 1e-300)))
+        if apply:
+            # accumulate: pred.var already carries the current scale, so multiplying keeps calibrate()
+            # idempotent (a second call on a calibrated model returns ~1 and leaves the scale put).
+            self._calibration *= s
+        return s
+
+    def history(self):
         """Return the prequential validation log accumulated across :meth:`refit` calls.
 
         Each :meth:`refit` scores its new points out-of-sample and appends them here, stamped with

@@ -82,9 +82,9 @@ def test_refit_roundtrip_with_matrix_Y():
 
     warm = _model()
     warm.fit(X0, _Y(X0))
-    # opt into the cold fit's semantics (MLE over all data); the refit default validation=True
+    # opt into the cold fit's semantics (MLE over all data); the refit default validate=True
     # optimizes a different objective. Same configured optimizer as the cold fit.
-    warm.refit(Xn, _Y(Xn), validation=False)
+    warm.refit(Xn, _Y(Xn), validate=False)
 
     assert warm.model["X"].shape[0] == 24
     xt = rng.random((10, 2))
@@ -114,6 +114,29 @@ def test_lbfgs_matrix_Y_end_to_end():
     interior = (theta > 1e-4 * 1.01) & (theta < 50.0 * 0.99)
     assert np.all(np.abs(grad[interior]) < 1e-3)
     assert model.predict(rng.random((5, 2))).y.shape == (5, 2)
+
+
+def test_multioutput_variance_is_output_mean_not_sum():
+    # the shared predictive variance AVERAGES the per-output sigma2 -- it must not SUM it (a sum
+    # grows with the number of outputs and is a meaningless scale). With q identical output columns
+    # the shared variance must equal the single-output variance, not q times it. theta is frozen
+    # (optimizer=None) so the multi- and single-output fits are identical up to the output count.
+    rng = np.random.default_rng(3)
+    X = rng.random((18, 2))
+    y = np.sum(np.sin(X * 3.0), axis=1)
+    Y = np.column_stack([y, y, y])  # 3 identical outputs
+    theta = 0.7 * np.ones(2)
+
+    multi = Dace(regr=CONSTANT, corr=GAUSS, theta=theta, optimizer=None)
+    multi.fit(X, Y)
+    single = Dace(regr=CONSTANT, corr=GAUSS, theta=theta, optimizer=None)
+    single.fit(X, y)
+
+    q = rng.random((5, 2))
+    vm = multi.predict(q, var=True).var
+    vs = single.predict(q, var=True).var
+    assert vm.shape == (5, 1)  # one shared variance per point, not (5, 3)
+    assert np.allclose(vm, vs)  # mean of identical outputs == single-output variance (a sum -> 3x)
 
 
 def test_predict_grad_and_mse_grad_shapes_for_multioutput():

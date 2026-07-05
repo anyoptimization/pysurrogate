@@ -18,13 +18,15 @@ class RandomForest(Model):
         self.n_estimators = n_estimators
 
     def _fit(self, X, y, **kwargs):
-        if self.xl is None:
-            self.xl = X.min(axis=0)
-        if self.xu is None:
-            self.xu = X.max(axis=0)
+        # resolve the grid bounds per fit into fit-local attributes; do NOT overwrite the
+        # constructor's xl/xu. Overwriting them froze the bounds after the first fit, so a later
+        # fit / refit on grown or shifted data silently re-used the original range and mis-binned
+        # the new points (discretize collapses anything outside the range).
+        self._xl = self.xl if self.xl is not None else X.min(axis=0)
+        self._xu = self.xu if self.xu is not None else X.max(axis=0)
 
         y = y[:, 0]
-        X = discretize(X, self.n_partitions, self.xl, self.xu)
+        X = discretize(X, self.n_partitions, self._xl, self._xu)
 
         # collapse duplicate grid cells, keeping the best (minimum) target per cell
         cells: dict[str, dict] = {}
@@ -46,7 +48,7 @@ class RandomForest(Model):
         self.model = rf
 
     def _predict(self, X, var=False, grad=False):
-        Xd = discretize(X, self.n_partitions, self.xl, self.xu)
+        Xd = discretize(X, self.n_partitions, self._xl, self._xu)
         y = self.model.predict(Xd)[:, None]
 
         # forest uncertainty = spread of the per-tree predictions (the ensemble disagreement).
