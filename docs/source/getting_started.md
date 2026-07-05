@@ -114,7 +114,7 @@ plt.title("prequential error as the design grows");
 Everything the loop saw is available as a tidy frame via `records()`:
 
 ```{code-cell} ipython3
-model.records().head()
+model.history().head()
 ```
 
 ## 5. Evaluate on a held-out set

@@ -237,6 +237,38 @@ plt.scatter(np.tile(X, 2), Y.ravel(), c="k", s=12, zorder=5)
 plt.legend(); plt.title("one Kriging model, two outputs");
 ```
 
+## High dimensions — KPLS
+
+Ordinary ARD Kriging tunes **one length-scale per input dimension**, so the `theta` search
+becomes intractable past ~20 dimensions. `KPLS` (Kriging with Partial Least Squares) keeps the
+Kriging engine but constrains those length-scales to a rank-`n_pls` subspace found by PLS —
+reducing the search to a handful of hyperparameters regardless of the input dimension. It
+trains far faster in high dimensions while keeping the predictive variance and gradients of a
+full GP.
+
+```{code-cell} ipython3
+import time
+from pysurrogate import KPLS
+from pysurrogate.util.test_functions import get_test_function
+
+hf, hxl, hxu = get_test_function("griewank", n_var=20)
+Xh = Sampling(80, LHS()).sample((hxl, hxu), rng=np.random.default_rng(0))
+yh = hf(Xh)
+Xht = Sampling(1000, LHS()).sample((hxl, hxu), rng=np.random.default_rng(1))
+yht = hf(Xht)
+
+for name, model in [("Kriging (ARD, 20 θ)", Kriging(ARD=True)), ("KPLS (n_pls=3)", KPLS(n_pls=3))]:
+    t = time.perf_counter(); model.fit(Xh, yh); fit_s = time.perf_counter() - t
+    rmse = calc_metric("rmse", yht, model.predict(Xht).y.ravel())
+    print(f"{name:>20}:  fit {fit_s:5.2f}s   test RMSE {rmse:.3f}")
+```
+
+On this 20-D problem KPLS fits an order of magnitude faster than full ARD Kriging, at
+comparable or better accuracy — and `predict(var=True, grad=True)` still returns the full
+suite. Sweep `n_pls` (2–4 is typical) via `cartesian(KPLS, n_pls=[2, 3, 4])` to trade cost for
+fidelity. KPLS assumes a product-exponential kernel, so use the default `Gaussian()` (or
+`Exponential()`).
+
 ## `Kriging` vs `Dace`
 
 - `Kriging` is the `Model`-lifecycle wrapper — use it for the uniform `fit`/`predict`
