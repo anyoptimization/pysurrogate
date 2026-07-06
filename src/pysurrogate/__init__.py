@@ -53,7 +53,7 @@ from pysurrogate.core.regression import (
     QuadraticRegression,
     Regression,
 )
-from pysurrogate.dace import Dace
+from pysurrogate.dace import MAP, Dace, HeldOut, MaximumLikelihood, Selection
 from pysurrogate.models import (
     KNN,
     KPLS,
@@ -86,6 +86,11 @@ __all__ = [
     "predictions_frame",
     # the flagship surrogate
     "Dace",
+    # hyperparameter-selection strategies
+    "Selection",
+    "MaximumLikelihood",
+    "MAP",
+    "HeldOut",
     # kernel zoo (GP covariances + radial bases)
     "Kernel",
     "Gaussian",
