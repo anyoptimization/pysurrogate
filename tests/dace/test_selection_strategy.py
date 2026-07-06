@@ -88,6 +88,16 @@ def test_heldout_default_objective_is_maximum_likelihood():
     assert isinstance(HeldOut(MAP(lam=0.1)).objective, MAP) and HeldOut(MAP(lam=0.1)).theta_prior is not None
 
 
+def test_heldout_defaults_to_a_single_lbfgs_descent():
+    from pysurrogate.optimizer import LBFGS
+
+    # early stopping is coherent only over one monotone descent, so HeldOut uses a single warm-started
+    # LBFGS rather than the engine's screen-and-restart default; an explicit objective optimizer wins.
+    assert isinstance(HeldOut().optimizer, LBFGS)
+    explicit = LBFGS()
+    assert HeldOut(MaximumLikelihood(optimizer=explicit)).optimizer is explicit  # caller's optimizer wins
+
+
 def test_heldout_split_is_deterministic_and_sized():
     sel = HeldOut(fraction=0.25, seed=3)
     tr, va = sel.holdout(40)
