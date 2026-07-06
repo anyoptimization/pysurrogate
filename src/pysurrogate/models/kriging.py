@@ -25,7 +25,15 @@ class Kriging(Model):
     """
 
     def __init__(
-        self, regr=None, corr=None, ARD=False, theta=1.0, theta_bounds=(0.0, 100.0), theta_prior=None, **kwargs
+        self,
+        regr=None,
+        corr=None,
+        ARD=False,
+        theta=1.0,
+        theta_bounds=(0.0, 100.0),
+        theta_prior=None,
+        selection=None,
+        **kwargs,
     ) -> None:
         super().__init__(eliminate_duplicates=True, **kwargs)
         self.regr = regr if regr is not None else LinearRegression()
@@ -34,6 +42,9 @@ class Kriging(Model):
         self.theta = theta
         self.theta_bounds = theta_bounds
         self.theta_prior = theta_prior
+        # optional hyperparameter-selection strategy (MLE / MAP / held-out), the same object Dace
+        # takes; when given it supplies the optimizer / prior / nugget policy (see Dace `selection`).
+        self.selection = selection
 
     def _fit(self, X, y, optimize=True, **kwargs):
         theta, theta_bounds = self.theta, self.theta_bounds
@@ -53,7 +64,12 @@ class Kriging(Model):
         # optimize=False freezes theta (the cheap fixed-length-scale fit used for model-selection
         # screening and frozen-theta loop refits) and optimize=True runs the configured search.
         self.model = Dace(
-            regr=self.regr, corr=self.corr, theta=theta, theta_bounds=theta_bounds, theta_prior=self.theta_prior
+            regr=self.regr,
+            corr=self.corr,
+            theta=theta,
+            theta_bounds=theta_bounds,
+            theta_prior=self.theta_prior,
+            selection=self.selection,
         )
         self.model.fit(X, y, optimize=optimize)
 

@@ -6,7 +6,7 @@ from sklearn.neural_network import MLPRegressor  # type: ignore[import-untyped]
 from pysurrogate.core.model import Model
 from pysurrogate.core.prediction import Prediction
 from pysurrogate.core.transformation import Standardization
-from pysurrogate.dace import ConstantRegression, Dace, Gaussian
+from pysurrogate.dace import ConstantRegression, Dace, Gaussian, MaximumLikelihood
 from pysurrogate.util.misc import at_least2d
 
 # smooth activations and their derivatives expressed in terms of the *post*-activation value ``a``
@@ -18,10 +18,6 @@ _ACT = {
     "relu": (lambda z: np.maximum(z, 0.0), lambda a: (a > 0).astype(float)),
     "identity": (lambda z: z, lambda a: np.ones_like(a)),
 }
-
-# sentinel: "optimizer not specified" -> let the Dace engine pick its default search (distinct from
-# optimizer=None, which Dace reads as "freeze the length-scale -- no search").
-_DEFAULT_SEARCH = object()
 
 
 class DeepKernelGP(Model):
@@ -60,26 +56,19 @@ class DeepKernelGP(Model):
         regr: GP regression trend on the features (default :class:`ConstantRegression`).
         theta: Starting length-scale of the feature-space Gaussian kernel.
         theta_bounds: ``(lo, hi)`` length-scale bounds for the GP search, or ``None`` (unbounded).
-        noise: The nugget on the GP diagonal. When ``noise_bounds`` is set this is the *start* of the
-            learned nugget; otherwise it is fixed. The small default doubles as a collapse floor --
-            deep kernels can map distinct points to near-identical features (saturated units), which a
-            zero nugget would leave singular.
-        noise_bounds: ``(lo, hi)`` to **learn** the nugget jointly with the length-scale (it becomes
-            an extra log-space search coordinate, optimized by the same likelihood/gradient), or
-            ``None`` to keep it fixed at ``noise``. Learned by default: a deep kernel's imperfect
-            feature map induces effective noise, so a fitted nugget smooths appropriately (and the
-            ``lo`` floor keeps a collapsed feature map positive-definite). ``optimize=False`` fits at
-            the fixed ``noise`` start instead of searching.
-        optimizer: The search strategy for the GP head's hyperparameters -- **the same object you
-            would pass to** :class:`~pysurrogate.dace.Dace` (``LBFGS``, ``Restart``, ``Adam``,
-            ``Boxmin``, ...). Unset uses the Dace default; ``None`` freezes the length-scale.
-        theta_prior: ``(mean, lam)`` MAP prior on ``log10(length-scale)`` forwarded to the GP head --
-            the same regularizer :class:`~pysurrogate.dace.Dace` takes. ``None`` (default) is pure MLE.
+        noise: The nugget floor / start on the GP diagonal. A deep kernel can map distinct points to
+            near-identical features (saturated units); the small default keeps the correlation matrix
+            positive-definite and is the lower bound / start when the nugget is learned.
+        selection: The GP head's hyperparameter-selection strategy -- **the same object you would pass
+            to** :class:`~pysurrogate.dace.Dace` (:class:`~pysurrogate.dace.MaximumLikelihood`,
+            :class:`~pysurrogate.dace.MAP`, :class:`~pysurrogate.dace.HeldOut`). Default (``None``)
+            learns the nugget by maximum likelihood over ``(noise, 1e-1)`` -- a deep kernel's imperfect
+            feature map induces effective noise, so a fitted nugget smooths appropriately.
 
-    The GP head's hyperparameters (length-scale, and the nugget when ``noise_bounds`` is set) are
-    selected by **maximum likelihood** -- the DACE profile likelihood, exactly as :class:`Kriging` --
-    tunable via the same ``optimizer`` / ``theta_prior`` / ``noise_bounds`` you would pass to Dace. The
-    MLP feature map, separately, is trained to minimize squared error (with early stopping).
+    Two objectives, cleanly separated: the MLP feature map is trained to minimize **squared error**
+    (with early stopping); the GP head's length-scale and nugget are chosen by the ``selection``
+    strategy (**maximum likelihood** by default, exactly as :class:`Kriging`). When the fit is frozen
+    (``optimize=False`` screening) the nugget is held at ``noise`` instead of learned.
     """
 
     def __init__(
@@ -96,9 +85,7 @@ class DeepKernelGP(Model):
         theta=1.0,
         theta_bounds=(0.0, 100.0),
         noise=1e-8,
-        noise_bounds=(1e-8, 1e-1),
-        optimizer=_DEFAULT_SEARCH,
-        theta_prior=None,
+        selection=None,
         **kwargs,
     ) -> None:
         # standardize inputs (the MLP needs scaled features) and outputs; the lifecycle un-scales the
@@ -118,9 +105,7 @@ class DeepKernelGP(Model):
         self.theta = theta
         self.theta_bounds = theta_bounds
         self.noise = noise
-        self.noise_bounds = noise_bounds
-        self.optimizer = optimizer
-        self.theta_prior = theta_prior
+        self.selection = selection
 
     def _features(self, X, jac=False):
         """Map inputs to the last-hidden-layer features ``phi(X)``; optionally also ``d phi / d x``.
@@ -171,23 +156,16 @@ class DeepKernelGP(Model):
 
         # fit the GP head on the learned features: an isotropic Gaussian in feature space (the NN
         # already handles per-input relevance, so one shared length-scale keeps the search cheap). The
-        # length-scale + nugget are selected by MLE via the same Dace knobs (optimizer/theta_prior/
-        # noise_bounds) the user would pass to a Dace/Kriging; the nugget floor keeps the fit PD.
-        search = {} if self.optimizer is _DEFAULT_SEARCH else {"optimizer": self.optimizer}
-        # the nugget can only be *learned* while the length-scale is searched; when the search is
-        # frozen (optimizer=None, or optimize=False for model-selection screening) fall back to the
-        # fixed `noise` floor rather than asking Dace to learn a nugget it will not search.
-        searching = optimize and self.optimizer is not None
-        noise_bounds = self.noise_bounds if searching else None
+        # length-scale + nugget are chosen by the `selection` strategy -- the same object Dace/Kriging
+        # take. Default: learn the nugget by MLE over (noise, 1e-1); the `noise` floor keeps it PD.
+        selection = self.selection if self.selection is not None else MaximumLikelihood(noise_bounds=(self.noise, 1e-1))
         self.gp = Dace(
             regr=self.regr,
             corr=Gaussian(),
             theta=self.theta,
             theta_bounds=self.theta_bounds,
             noise=self.noise,
-            noise_bounds=noise_bounds,
-            theta_prior=self.theta_prior,
-            **search,
+            selection=selection,
         )
         self.gp.fit(self._features(X), y, optimize=optimize)
 

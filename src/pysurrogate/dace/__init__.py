@@ -19,11 +19,22 @@ from pysurrogate.dace.regr import (
     LinearRegression,
     QuadraticRegression,
 )
+from pysurrogate.dace.selection import (
+    MAP,
+    HeldOut,
+    MaximumLikelihood,
+    Selection,
+)
 
 __all__ = [
     "Dace",
     "Prediction",
     "DaceFitError",
+    # hyperparameter-selection strategies
+    "Selection",
+    "MaximumLikelihood",
+    "MAP",
+    "HeldOut",
     # regression trends
     "ConstantRegression",
     "LinearRegression",
