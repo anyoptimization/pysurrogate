@@ -8,11 +8,14 @@ from pysurrogate.models.kriging import Kriging
 from pysurrogate.models.mean import SimpleMean
 from pysurrogate.models.rbf import RBF
 from pysurrogate.models.regression import PolynomialRegression
+from pysurrogate.models.subspace import RotatedKriging, active_subspace
 from pysurrogate.models.svr import SVR
 
 __all__ = [
     "Kriging",
     "KPLS",
+    "RotatedKriging",
+    "active_subspace",
     "RBF",
     "SVR",
     "KNN",
