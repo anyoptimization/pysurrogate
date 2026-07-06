@@ -6,6 +6,7 @@ from pysurrogate.models.knn import KNN
 from pysurrogate.models.kpls import KPLS
 from pysurrogate.models.kriging import Kriging
 from pysurrogate.models.mean import SimpleMean
+from pysurrogate.models.neural import DeepKernelGP
 from pysurrogate.models.rbf import RBF
 from pysurrogate.models.regression import PolynomialRegression
 from pysurrogate.models.subspace import RotatedKriging, active_subspace
@@ -15,6 +16,7 @@ __all__ = [
     "Kriging",
     "KPLS",
     "RotatedKriging",
+    "DeepKernelGP",
     "active_subspace",
     "RBF",
     "SVR",
