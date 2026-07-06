@@ -5,6 +5,7 @@ import numpy as np
 from pysurrogate.core.optimizer import Callback
 from pysurrogate.dace.corr import calc_kernel_matrix
 from pysurrogate.dace.fit import DaceFitError, fit
+from pysurrogate.optimizer import LBFGS
 
 # sentinel for a Selection's optimizer: "not specified -> let the engine pick its default search"
 # (distinct from optimizer=None, which the engine reads as "freeze the length-scale -- no search").
@@ -78,9 +79,18 @@ class HeldOut(Selection):
     hyperparameters that generalize best rather than the ones that maximize the training likelihood.
     The split is deterministic in ``seed`` so a fit stays reproducible.
 
+    Unless the ``objective`` names its own optimizer, the search is a single warm-started
+    :class:`~pysurrogate.optimizer.LBFGS` descent -- **not** the engine's default screen-and-restart.
+    Early stopping is only coherent over one monotone descent: the visited candidates then form a
+    single objective-descent trajectory along which "the held-out error stopped improving" is a real
+    signal (exactly as a neural net's early stopping watches one training curve). A screen + multi-start
+    trajectory would trip ``patience`` on random screen points or across restarts. Pass an ``objective``
+    with an explicit optimizer to override (e.g. a multi-start search, giving robustness at the cost of
+    a coarser early-stopping signal).
+
     Args:
         objective: The training objective to descend -- :class:`MaximumLikelihood` (default) or
-            :class:`MAP`. Its optimizer, prior, and nugget policy are inherited.
+            :class:`MAP`. Its optimizer (if any), prior, and nugget policy are inherited.
         fraction: Fraction of the training rows held out for selection.
         patience: Stop after this many consecutive non-improving held-out evaluations. ``None`` never
             early-stops -- it descends the whole objective and just keeps the best-on-validation seen.
@@ -89,7 +99,11 @@ class HeldOut(Selection):
 
     def __init__(self, objective=None, fraction=0.25, patience=10, seed=0):
         base = objective if objective is not None else MaximumLikelihood()
-        super().__init__(optimizer=base.optimizer, noise_bounds=base.noise_bounds, theta_prior=base.theta_prior)
+        # a single warm-started descent so the visited trajectory is one monotone objective descent --
+        # the only sequence over which validation-based early stopping is coherent. An objective that
+        # names its own optimizer keeps it (the caller opts back into a multi-start search).
+        optimizer = LBFGS() if base.optimizer is _UNSET else base.optimizer
+        super().__init__(optimizer=optimizer, noise_bounds=base.noise_bounds, theta_prior=base.theta_prior)
         self.objective = base
         self.fraction = float(fraction)
         self.patience = patience
