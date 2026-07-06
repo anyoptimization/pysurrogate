@@ -103,7 +103,15 @@ class RotatedKriging(Model):
     """
 
     def __init__(
-        self, regr=None, n_components=None, k=None, theta=1.0, theta_bounds=(0.0, 100.0), theta_prior=None, **kwargs
+        self,
+        regr=None,
+        n_components=None,
+        k=None,
+        theta=1.0,
+        theta_bounds=(0.0, 100.0),
+        theta_prior=None,
+        selection=None,
+        **kwargs,
     ) -> None:
         super().__init__(eliminate_duplicates=True, **kwargs)
         self.regr = regr if regr is not None else LinearRegression()
@@ -112,6 +120,7 @@ class RotatedKriging(Model):
         self.theta = theta
         self.theta_bounds = theta_bounds
         self.theta_prior = theta_prior
+        self.selection = selection  # optional hyperparameter-selection strategy, forwarded to Dace
 
     def _engine(self, X, y):
         """Build the ``Dace`` engine with a data-estimated Mahalanobis rotation and a length-``h`` theta."""
@@ -123,7 +132,12 @@ class RotatedKriging(Model):
             lo, hi = theta_bounds
             theta_bounds = (np.full(h, lo), np.full(h, hi))
         return Dace(
-            regr=self.regr, corr=Mahalanobis(A), theta=theta, theta_bounds=theta_bounds, theta_prior=self.theta_prior
+            regr=self.regr,
+            corr=Mahalanobis(A),
+            theta=theta,
+            theta_bounds=theta_bounds,
+            theta_prior=self.theta_prior,
+            selection=self.selection,
         )
 
     def _fit(self, X, y, optimize=True, **kwargs):

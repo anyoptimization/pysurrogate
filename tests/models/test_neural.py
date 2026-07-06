@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 
+from pysurrogate.dace import MAP, MaximumLikelihood
 from pysurrogate.models import DeepKernelGP, SimpleMean
 
 
@@ -136,10 +137,11 @@ def test_early_stopping_curbs_overfitting_on_a_noisy_small_design():
         p = model.fit(Xtr, ytr).predict(Xte).y
         return float(np.sqrt(np.mean((p - yte) ** 2)))
 
-    # fix the GP nugget (noise_bounds=None) so the *feature map's* overfitting is what's tested --
-    # otherwise the learned GP nugget also absorbs the noise and masks the NN early-stopping effect.
-    guarded = rmse(DeepKernelGP(early_stopping=True, random_state=0, noise_bounds=None))
-    unguarded = rmse(DeepKernelGP(early_stopping=False, random_state=0, noise_bounds=None))
+    # fix the GP nugget (MaximumLikelihood with no noise_bounds) so the *feature map's* overfitting is
+    # what's tested -- otherwise the learned GP nugget also absorbs the noise and masks the NN effect.
+    fixed_nugget = MaximumLikelihood()
+    guarded = rmse(DeepKernelGP(early_stopping=True, random_state=0, selection=fixed_nugget))
+    unguarded = rmse(DeepKernelGP(early_stopping=False, random_state=0, selection=fixed_nugget))
     assert guarded <= unguarded * 1.05  # early stopping is competitive-or-better; generous margin
 
 
@@ -155,14 +157,18 @@ def test_nugget_is_learned_by_maximum_likelihood():
     assert noisy.gp.model["noise"] > 10 * clean.gp.model["noise"]  # learned to smooth the noise
 
 
-def test_forwards_selection_knobs_to_the_gp_head():
+def test_forwards_the_selection_strategy_to_the_gp_head():
     X, y = _data(50)
-    # noise_bounds=None keeps the nugget fixed at `noise` (verifies the knob is forwarded)
-    fixed = DeepKernelGP(noise=5e-3, noise_bounds=None).fit(X, y)
+    # a MaximumLikelihood selection with no noise_bounds keeps the nugget fixed at `noise`
+    fixed = DeepKernelGP(noise=5e-3, selection=MaximumLikelihood()).fit(X, y)
     assert fixed.gp.model["noise"] == 5e-3
-    # optimizer=None freezes the length-scale at its start (the same meaning Dace gives it)
-    frozen = DeepKernelGP(optimizer=None, theta=0.7).fit(X, y)
+    # optimizer=None on the selection freezes the length-scale at its start (the Dace meaning)
+    frozen = DeepKernelGP(theta=0.7, selection=MaximumLikelihood(optimizer=None)).fit(X, y)
     assert np.allclose(frozen.gp.model["theta"], 0.7)
+    # a MAP selection pulls the length-scale toward a smoother fit vs pure MLE
+    mle = DeepKernelGP(selection=MaximumLikelihood(), random_state=0).fit(X, y).gp.model["theta"]
+    mapped = DeepKernelGP(selection=MAP(mean=1.0, lam=0.5), random_state=0).fit(X, y).gp.model["theta"]
+    assert float(np.atleast_1d(mapped)[0]) > float(np.atleast_1d(mle)[0])
 
 
 def test_screening_fit_without_search_does_not_crash():

@@ -55,6 +55,7 @@ class KPLS(Model):
         theta=1.0,
         theta_bounds=(0.0, 100.0),
         optimizer=_DEFAULT_OPTIMIZER,
+        selection=None,
         **kwargs,
     ) -> None:
         super().__init__(eliminate_duplicates=True, **kwargs)
@@ -76,6 +77,10 @@ class KPLS(Model):
         # layer deep-copies models per fold, and a bare object() sentinel does not survive deepcopy
         # by identity -- storing the real Adam keeps `is`-checks out of the hot path entirely.
         self.optimizer = _default_optimizer() if optimizer is _DEFAULT_OPTIMIZER else optimizer
+        # optional hyperparameter-selection strategy (MLE / MAP / held-out), forwarded to Dace. When
+        # given it supplies the optimizer (overriding the Adam default above), the MAP prior, and the
+        # nugget policy; None keeps the KPLS defaults.
+        self.selection = selection
 
     def _pls_weights(self, X, y, h):
         """Squared PLS weights ``(d, h)`` in the engine's standardized space.
@@ -105,7 +110,14 @@ class KPLS(Model):
         theta = np.full(h, self.theta)
         theta_bounds = (np.full(h, lo), np.full(h, hi))
         # self.optimizer is already a concrete optimizer (or None to freeze), resolved in __init__.
-        return Dace(regr=self.regr, corr=kernel, theta=theta, theta_bounds=theta_bounds, optimizer=self.optimizer)
+        return Dace(
+            regr=self.regr,
+            corr=kernel,
+            theta=theta,
+            theta_bounds=theta_bounds,
+            optimizer=self.optimizer,
+            selection=self.selection,
+        )
 
     def _fit(self, X, y, optimize=True, **kwargs):
         self.model = self._kpls_engine(X, y)

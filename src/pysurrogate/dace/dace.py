@@ -11,6 +11,7 @@ from pysurrogate.dace.corr import Gaussian
 from pysurrogate.dace.fit import DaceFitError, fit
 from pysurrogate.dace.problem import DaceProblem
 from pysurrogate.dace.regr import ConstantRegression
+from pysurrogate.dace.selection import _UNSET as _SELECTION_UNSET
 from pysurrogate.dace.selection import ValidationSelection
 from pysurrogate.optimizer import LBFGS, Restart
 
@@ -39,6 +40,7 @@ class Dace:
         noise=0.0,
         noise_bounds=None,
         theta_prior=None,
+        selection=None,
     ):
         """Construct the model with the given regression and correlation types.
 
@@ -89,7 +91,25 @@ class Dace:
                 exactly, so it is the golden-safe library default -- turn it on for downstream
                 optimization (Bayesian optimization), where calibrated-conservative uncertainty
                 matters more than raw fit accuracy.
+            selection: A :class:`~pysurrogate.dace.selection.Selection` strategy
+                (:class:`~pysurrogate.dace.selection.MaximumLikelihood`,
+                :class:`~pysurrogate.dace.selection.MAP`, :class:`~pysurrogate.dace.selection.HeldOut`)
+                that bundles the hyperparameter selection in one object -- the search ``optimizer``, the
+                MAP ``theta_prior``, the ``noise_bounds`` nugget policy, and (for a held-out strategy)
+                an internal train/validation split. When given it supplies those, overriding the
+                individual arguments. ``None`` (default) leaves the explicit arguments in force -- the
+                historical behavior, byte-for-byte, so the default fit path is unchanged.
         """
+        # a Selection strategy bundles the search configuration in one object; when given it supplies
+        # the optimizer, the MAP prior, and the nugget policy (overriding those individual knobs) and
+        # -- for a held-out strategy -- an internal train/validation split consulted in fit(). Default
+        # (selection=None) leaves the explicit params in force: the historical behavior, byte-for-byte.
+        self._selection = selection
+        if selection is not None:
+            optimizer = _DEFAULT_OPTIMIZER if selection.optimizer is _SELECTION_UNSET else selection.optimizer
+            theta_prior = selection.theta_prior
+            noise_bounds = selection.noise_bounds
+
         self.regr = regr if regr is not None else ConstantRegression()
         self.kernel = corr if corr is not None else Gaussian()
 
@@ -173,11 +193,33 @@ class Dace:
         nX, nY, stats = self._standardize(X, Y)
         effective_optimizer, optimize_theta = self._search_config(optimize)
         if optimize_theta:
-            theta, noise, self.optimization = self._optimize_generic(nX, nY, effective_optimizer)
+            # a held-out Selection searches on the training split and selects by error on the val split;
+            # every other case (the default) searches over all rows by likelihood -- byte-identical.
+            val = self._fit_holdout(nX, nY)
+            if val is None:
+                theta, noise, self.optimization = self._optimize_generic(nX, nY, effective_optimizer)
+            else:
+                (trX, trY), (vX, vY) = val
+                theta, noise, self.optimization = self._optimize_generic(trX, trY, effective_optimizer, val=(vX, vY))
         else:
             # frozen theta (optimizer=None or optimize=False): commit at the current theta and noise.
             theta, noise, self.optimization = self.theta, self.noise, None
+        # commit the final GLS fit on ALL rows at the selected (theta, noise), even under a held-out split.
         self._commit(nX, nY, X, Y, stats, theta, noise, wrap_pd_error=optimize_theta)
+
+    def _fit_holdout(self, nX, nY):
+        """The ``(train, val)`` standardized split for a held-out Selection, or ``None`` for MLE/MAP.
+
+        Returns ``None`` unless a :class:`~pysurrogate.dace.selection.Selection` with a held-out policy
+        is configured -- so the default fit path is untouched.
+        """
+        if self._selection is None:
+            return None
+        idx = self._selection.holdout(nX.shape[0])
+        if idx is None:
+            return None
+        tr, va = idx
+        return (nX[tr], nY[tr]), (nX[va], nY[va])
 
     def _standardize(self, X, Y):
         """Standardize inputs and targets to zero mean / unit variance (``ddof=1``); return ``(nX, nY, stats)``.
@@ -195,8 +237,10 @@ class Dace:
         """Resolve and validate ``(effective_optimizer, optimize_theta)`` for this fit.
 
         The effective optimizer is the configured one only when ``optimize`` is True; ``optimize=False``
-        (or ``optimizer=None``) freezes theta -- no search. The nugget is learned exactly when
-        ``noise_bounds`` was given, which requires an optimizer.
+        (or ``optimizer=None``) freezes theta -- no search. Learning the nugget needs a search: a
+        *permanent* ``optimizer=None`` with ``noise_bounds`` is a contradiction and raises, but a
+        per-fit ``optimize=False`` screen just freezes the nugget at ``noise`` (no raise) so the same
+        model can learn the nugget on a cold fit and screen cheaply with it frozen.
         """
         effective_optimizer = self.optimizer if optimize else None
         optimize_theta = effective_optimizer is not None
@@ -206,8 +250,11 @@ class Dace:
                 f"{type(effective_optimizer).__name__} is not a core.optimizer.Optimizer -- pass a generic "
                 "optimizer (LBFGS, PatternSearch, Boxmin, ...) or optimizer=None / optimize=False to freeze theta."
             )
-        if optimize_noise and not optimize_theta:
-            raise Exception("noise_bounds requires an optimizer -- the nugget is learned jointly with theta.")
+        if optimize_noise and self.optimizer is None:
+            raise Exception(
+                "noise_bounds needs an optimizer to learn the nugget -- build with one, or drop noise_bounds "
+                "to fix the nugget at `noise`."
+            )
         return effective_optimizer, optimize_theta
 
     def _commit(self, nX, nY, X, Y, stats, theta, noise, wrap_pd_error=False):
