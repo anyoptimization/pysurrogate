@@ -63,6 +63,31 @@ def test_maximum_likelihood_can_learn_the_nugget():
     assert noisy > 10 * clean  # the likelihood learns a larger nugget on noisy data
 
 
+def test_heldout_optimizes_mle_or_map_and_early_stops_on_validation():
+    X, y = _data(60, seed=5)
+
+    def fit(selection):
+        m = Dace(regr=ConstantRegression(), corr=Gaussian(), theta=1.0, theta_bounds=(0.01, 100.0), selection=selection)
+        m.fit(X, y)
+        return m.optimization["n_evals"], float(np.atleast_1d(m.model["theta"])[0])
+
+    # early stopping: a small patience stops the held-out search sooner than never-stopping
+    n_patient, _ = fit(HeldOut(patience=3))
+    n_full, _ = fit(HeldOut(patience=None))
+    assert n_patient <= n_full
+
+    # composes the training objective: a MAP-based HeldOut selects a smoother length-scale than MLE
+    _, t_mle = fit(HeldOut(MaximumLikelihood()))
+    _, t_map = fit(HeldOut(MAP(mean=1.0, lam=0.5)))
+    assert t_map > t_mle
+
+
+def test_heldout_default_objective_is_maximum_likelihood():
+    ho = HeldOut()
+    assert isinstance(ho.objective, MaximumLikelihood) and ho.theta_prior is None
+    assert isinstance(HeldOut(MAP(lam=0.1)).objective, MAP) and HeldOut(MAP(lam=0.1)).theta_prior is not None
+
+
 def test_heldout_split_is_deterministic_and_sized():
     sel = HeldOut(fraction=0.25, seed=3)
     tr, va = sel.holdout(40)

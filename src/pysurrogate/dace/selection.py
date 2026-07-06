@@ -32,6 +32,7 @@ class Selection:
         self.optimizer = optimizer
         self.noise_bounds = noise_bounds
         self.theta_prior = theta_prior
+        self.patience = None  # early-stop after this many non-improving held-out evals (HeldOut sets it)
 
     def holdout(self, n):
         """``(train_idx, val_idx)`` to hold out for validation-based selection, or ``None``.
@@ -67,24 +68,31 @@ class MAP(Selection):
 
 
 class HeldOut(Selection):
-    """Search by likelihood but *pick* the hyperparameters by held-out error on an internal split.
+    """Optimize the training objective (MLE or MAP) but early-stop and select on held-out error.
 
-    The optimizer still descends the profile likelihood; every visited candidate is re-scored on a
-    random held-out fraction and the lowest-error one is kept (via :class:`ValidationSelection`). A
-    validation-based regularizer against likelihood over-fitting -- the fit-time analogue of the
-    held-out selection :meth:`~pysurrogate.dace.Dace.refit` already does on the newly appended points.
-    The split is deterministic in ``seed``, so a fit stays reproducible.
+    The optimizer descends the ``objective`` -- maximum likelihood, or a MAP prior when the objective
+    carries one -- on a training split; every visited candidate is re-scored on the held-out split;
+    the search **stops once that held-out error stops improving** for ``patience`` evaluations; and the
+    **best-on-validation** hyperparameters are returned (then the final GLS fit is committed on all
+    rows). The fit-time analogue of early stopping: descend the training objective, but keep the
+    hyperparameters that generalize best rather than the ones that maximize the training likelihood.
+    The split is deterministic in ``seed`` so a fit stays reproducible.
 
     Args:
+        objective: The training objective to descend -- :class:`MaximumLikelihood` (default) or
+            :class:`MAP`. Its optimizer, prior, and nugget policy are inherited.
         fraction: Fraction of the training rows held out for selection.
+        patience: Stop after this many consecutive non-improving held-out evaluations. ``None`` never
+            early-stops -- it descends the whole objective and just keeps the best-on-validation seen.
         seed: Seed for the (deterministic) split.
-        optimizer: As :class:`Selection`.
-        noise_bounds: As :class:`Selection`.
     """
 
-    def __init__(self, fraction=0.25, seed=0, optimizer=_UNSET, noise_bounds=None):
-        super().__init__(optimizer=optimizer, noise_bounds=noise_bounds)
+    def __init__(self, objective=None, fraction=0.25, patience=10, seed=0):
+        base = objective if objective is not None else MaximumLikelihood()
+        super().__init__(optimizer=base.optimizer, noise_bounds=base.noise_bounds, theta_prior=base.theta_prior)
+        self.objective = base
         self.fraction = float(fraction)
+        self.patience = patience
         self.seed = int(seed)
 
     def holdout(self, n):

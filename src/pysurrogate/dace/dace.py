@@ -200,7 +200,11 @@ class Dace:
                 theta, noise, self.optimization = self._optimize_generic(nX, nY, effective_optimizer)
             else:
                 (trX, trY), (vX, vY) = val
-                theta, noise, self.optimization = self._optimize_generic(trX, trY, effective_optimizer, val=(vX, vY))
+                # the search descends the objective on the train split; the held-out callback selects
+                # by val error and early-stops after `patience` non-improving evals (the Selection's).
+                theta, noise, self.optimization = self._optimize_generic(
+                    trX, trY, effective_optimizer, val=(vX, vY), patience=self._selection.patience
+                )
         else:
             # frozen theta (optimizer=None or optimize=False): commit at the current theta and noise.
             theta, noise, self.optimization = self.theta, self.noise, None
@@ -296,20 +300,22 @@ class Dace:
         p = len(np.atleast_1d(np.asarray(self.theta, dtype=float)))
         return (np.full(p, 1e-12), np.full(p, np.inf))
 
-    def _optimize_generic(self, nX, nY, optimizer, val=None):
+    def _optimize_generic(self, nX, nY, optimizer, val=None, patience=None):
         """Run a generic optimizer over a DaceProblem on ``(nX, nY)``; return ``(theta, noise, record)``.
 
         With ``val=(nXv, nYv)`` the candidates are *selected* by held-out error on that set
-        (:class:`ValidationSelection`) while the optimizer still searches by likelihood; without it
-        selection is pure maximum likelihood. With ``noise_bounds`` the nugget is a learned
-        coordinate. Forming the held-out split is the caller's concern (:meth:`refit` holds out the
-        newly appended points) -- this method just wires the selection callback.
+        (:class:`ValidationSelection`) while the optimizer still searches by likelihood; ``patience``
+        early-stops the search after that many non-improving held-out evaluations (``None`` = never).
+        Without ``val``, selection is pure maximum likelihood. With ``noise_bounds`` the nugget is a
+        learned coordinate. Forming the held-out split is the caller's concern (:meth:`refit` holds out
+        the newly appended points, a :class:`HeldOut` selection an internal split) -- this method just
+        wires the selection callback.
         """
         # noise_bounds set (nl/nu) -> learn the nugget; else fix it at self.noise. Mirrors theta.
         noise_kw = {"noise_bounds": (self.nl, self.nu)} if self.nl is not None else {"noise": self.noise}
         theta_bounds = self._theta_bounds_for_problem()
         problem = DaceProblem(nX, nY, self.regr, self.kernel, theta_bounds, theta_prior=self.theta_prior, **noise_kw)
-        callback = ValidationSelection(problem, val[0], val[1]) if val is not None else Callback()
+        callback = ValidationSelection(problem, val[0], val[1], patience=patience) if val is not None else Callback()
 
         x0 = self._encode_start(problem)
         res = optimizer.setup(problem, x0=x0, callback=callback).run()
