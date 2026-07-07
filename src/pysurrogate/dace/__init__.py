@@ -14,6 +14,7 @@ from pysurrogate.dace.corr import (
 )
 from pysurrogate.dace.dace import Dace
 from pysurrogate.dace.fit import DaceFitError
+from pysurrogate.dace.prior import GaussianPrior, Prior
 from pysurrogate.dace.regr import (
     ConstantRegression,
     LinearRegression,
@@ -35,6 +36,9 @@ __all__ = [
     "MaximumLikelihood",
     "MAP",
     "HeldOut",
+    # length-scale priors
+    "Prior",
+    "GaussianPrior",
     # regression trends
     "ConstantRegression",
     "LinearRegression",

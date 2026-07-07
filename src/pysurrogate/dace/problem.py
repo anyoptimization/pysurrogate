@@ -6,6 +6,7 @@ from pysurrogate.core.kernel import pairwise_diffs
 from pysurrogate.core.optimizer import Evaluation, Problem
 from pysurrogate.core.parameter import Log10, Parameter, ParameterSpace
 from pysurrogate.dace.fit import batch_obj_grad
+from pysurrogate.dace.prior import resolve_prior
 
 _LN10 = np.log(10.0)
 _FLOOR = 1e-12  # keep log10 of a zero/near-zero bound finite
@@ -59,7 +60,7 @@ class DaceProblem(Problem):
         self.regr, self.kernel = regr, kernel
 
         # optional MAP prior on the encoded length-scales: (mean, lam) or None for pure MLE.
-        self._prior = None if theta_prior is None else (float(theta_prior[0]), float(theta_prior[1]))
+        self._prior = resolve_prior(theta_prior)  # None, or a Prior (a (mean, lam) tuple -> GaussianPrior)
 
         # the componentwise differences are theta-independent, so build them once here and reuse
         # them across every objective/gradient evaluation of the search (instead of rebuilding the
@@ -169,7 +170,7 @@ class DaceProblem(Problem):
         return theta, float(noise)
 
     def _prior_penalty(self, Z):
-        """MAP penalty ``lam * sum((z - mean)**2)`` per candidate over the log10 length-scales ``Z``.
+        """The MAP prior's penalty per candidate over the log10 length-scales ``Z``.
 
         Args:
             Z: The encoded length-scale coordinates of the population, shape ``(J, p)``.
@@ -177,10 +178,7 @@ class DaceProblem(Problem):
         Returns:
             The per-candidate penalty ``(J,)``, or ``0.0`` when no prior is set.
         """
-        if self._prior is None:
-            return 0.0
-        mean, lam = self._prior
-        return lam * np.sum((Z - mean) ** 2, axis=1)
+        return 0.0 if self._prior is None else self._prior.penalty(Z)
 
     def screen(self, X):
         """Cheap objective-only ranking (no gradient) -- the fast path for Restart's screen."""
@@ -213,14 +211,14 @@ class DaceProblem(Problem):
         if self.learn_noise:
             grad = np.hstack([grad, (dnoise * noise * _LN10)[:, None]])
 
-        # MAP prior on the encoded length-scales: add lam*sum((z-mean)^2) to the objective and its
-        # gradient 2*lam*(z-mean) directly in log10 space (the search coordinate). Applied to the
-        # length-scale (fill) coordinates only -- never the fixed shape coordinates (e.g. `power`) --
-        # and only on feasible rows (infeasible keep obj=+inf, grad=0).
+        # MAP prior on the encoded length-scales: add the prior's penalty to the objective and its
+        # gradient directly in log10 space (the search coordinate). Applied to the length-scale (fill)
+        # coordinates only -- never the fixed shape coordinates (e.g. `power`) -- and only on feasible
+        # rows (infeasible keep obj=+inf, grad=0). The Prior object supplies the penalty and its
+        # gradient (e.g. GaussianPrior's ridge lam*(z-mean)^2).
         if self._prior is not None:
             Z = X[:, self._ls_lo : self._ls_hi]
-            mean, lam = self._prior
             obj = obj + self._prior_penalty(Z)
-            grad[:, self._ls_lo : self._ls_hi] += feasible[:, None] * (2.0 * lam * (Z - mean))
+            grad[:, self._ls_lo : self._ls_hi] += feasible[:, None] * self._prior.grad(Z)
 
         return Evaluation(f=obj, feasible=feasible, grad=grad, info=None)
