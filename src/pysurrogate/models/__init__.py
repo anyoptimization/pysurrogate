@@ -1,5 +1,6 @@
 """Model backends built on the core fit/predict lifecycle."""
 
+from pysurrogate.models.bayesian import FullyBayesianGP
 from pysurrogate.models.forest import RandomForest
 from pysurrogate.models.idw import InverseDistanceWeighting
 from pysurrogate.models.knn import KNN
@@ -17,6 +18,7 @@ __all__ = [
     "KPLS",
     "RotatedKriging",
     "DeepKernelGP",
+    "FullyBayesianGP",
     "active_subspace",
     "RBF",
     "SVR",
