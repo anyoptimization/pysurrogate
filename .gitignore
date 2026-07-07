@@ -20,3 +20,7 @@ dist/
 # Env
 .venv/
 venv/
+
+# Claude Code working scratch (not project files)
+.claude/
+HANDOFF.md
