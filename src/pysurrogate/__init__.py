@@ -6,8 +6,10 @@ from pysurrogate.core import (
     CrossvalidationPartitioning,
     Evaluation,
     Model,
+    NoNormalization,
     Optimizer,
     Partitioning,
+    Plog,
     Prediction,
     Problem,
     Random,
@@ -16,6 +18,9 @@ from pysurrogate.core import (
     Sampling,
     SamplingMethod,
     Split,
+    Standardization,
+    Transformation,
+    ZeroToOneNormalization,
     predictions_frame,
 )
 from pysurrogate.core.kernel import (
@@ -54,16 +59,20 @@ from pysurrogate.core.regression import (
     Regression,
 )
 from pysurrogate.dace import MAP, Dace, HeldOut, MaximumLikelihood, Selection
+from pysurrogate.landscape import Landscape
 from pysurrogate.models import (
     KNN,
     KPLS,
     RBF,
     SVR,
+    DeepKernelGP,
     InverseDistanceWeighting,
     Kriging,
     PolynomialRegression,
     RandomForest,
+    RotatedKriging,
     SimpleMean,
+    active_subspace,
 )
 from pysurrogate.optimizer import LBFGS, Adam, Boxmin, PatternSearch, Restart
 from pysurrogate.selection import (
@@ -132,6 +141,9 @@ __all__ = [
     # model backends
     "Kriging",
     "KPLS",
+    "RotatedKriging",
+    "DeepKernelGP",
+    "active_subspace",
     "RBF",
     "SVR",
     "KNN",
@@ -155,6 +167,12 @@ __all__ = [
     "SamplingMethod",
     "LHS",
     "Random",
+    # input/output transformations
+    "Transformation",
+    "NoNormalization",
+    "Standardization",
+    "ZeroToOneNormalization",
+    "Plog",
     # partitioning / cross-validation
     "Partitioning",
     "CrossvalidationPartitioning",
@@ -169,5 +187,7 @@ __all__ = [
     "score",
     "cartesian",
     "as_named",
+    # exploratory landscape analysis
+    "Landscape",
     "__version__",
 ]

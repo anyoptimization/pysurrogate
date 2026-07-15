@@ -1,26 +1,40 @@
 """Backend-agnostic surrogate core: the Prediction type and the Model fit/predict lifecycle."""
 
 from pysurrogate.core.kernel import (
+    ComposedKernel,
     Correlation,
     Cubic,
+    CubicRadial,
+    Exp,
     Exponential,
     Gaussian,
     GeneralizedExponential,
     Kernel,
+    KPLSKernel,
     Linear,
+    LinearRadial,
+    Mahalanobis,
     Matern,
+    Metric,
     Multiquadric,
     ProductKernel,
+    Profile,
+    ProjectedSquare,
     RadialKernel,
     RationalQuadratic,
+    ReducedMetric,
     Spherical,
     Spline,
+    SquareThenMix,
     ThinPlateSpline,
+    WeightedAbs,
+    WeightedSquare,
     calc_kernel_matrix,
     calc_kernel_tensor,
 )
 from pysurrogate.core.model import Model
 from pysurrogate.core.optimizer import Callback, Evaluation, Optimizer, Problem, Result
+from pysurrogate.core.parameter import Encoding, Log10, Parameter, ParameterSpace
 from pysurrogate.core.partitioning import (
     DEFAULT_CV_FOLDS,
     CrossvalidationPartitioning,
@@ -73,6 +87,7 @@ __all__ = [
     "ConstantRegression",
     "LinearRegression",
     "QuadraticRegression",
+    # kernel zoo (GP covariances + radial bases)
     "Kernel",
     "Correlation",
     "ProductKernel",
@@ -88,6 +103,25 @@ __all__ = [
     "Matern",
     "ThinPlateSpline",
     "Multiquadric",
+    "LinearRadial",
+    "CubicRadial",
+    # kernel composition (distance x curve) + reusable metrics/profiles
+    "Metric",
+    "Profile",
+    "ComposedKernel",
+    "ReducedMetric",
+    "Exp",
+    "WeightedSquare",
+    "WeightedAbs",
+    "ProjectedSquare",
+    "SquareThenMix",
+    "Mahalanobis",
+    "KPLSKernel",
     "calc_kernel_matrix",
     "calc_kernel_tensor",
+    # tunable-parameter concept
+    "Parameter",
+    "ParameterSpace",
+    "Encoding",
+    "Log10",
 ]

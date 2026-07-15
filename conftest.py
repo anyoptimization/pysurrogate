@@ -1,6 +1,14 @@
-"""Pytest config: pin BLAS to a single thread so many tiny solves don't thrash."""
+"""Pytest config: import the in-tree source and pin BLAS to a single thread."""
 
 import os
+import sys
+from pathlib import Path
+
+# Always test the checkout this conftest lives in. An editable install of
+# pysurrogate elsewhere (e.g. the primary clone, when running in a git worktree
+# or a CI checkout) would otherwise win the import race via its site-packages
+# .pth entry, silently testing the wrong tree.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 # Dace fits small (~20-30 row) correlation matrices hundreds of times during the theta
 # search. OpenBLAS spawns a per-core thread pool for *every* Cholesky/solve, and on
