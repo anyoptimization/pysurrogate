@@ -1,10 +1,11 @@
 """Tests for DaceProblem: the DACE likelihood as a generic Problem, noise folded into the vector."""
 
 import numpy as np
+import pytest
 
 from pysurrogate.core.optimizer import Callback
 from pysurrogate.core.sampling import LHS, Sampling
-from pysurrogate.dace.corr import Gaussian
+from pysurrogate.dace.corr import Gaussian, GeneralizedExponential
 from pysurrogate.dace.fit import batch_obj_grad, fit
 from pysurrogate.dace.problem import DaceProblem
 from pysurrogate.dace.regr import ConstantRegression
@@ -12,6 +13,30 @@ from pysurrogate.optimizer import LBFGS, PatternSearch
 
 GAUSS = Gaussian()
 CONST = ConstantRegression()
+
+
+def test_generalized_exponential_scalar_bounds_raises_clearly():
+    # GeneralizedExponential declares a fixed `power` shape coordinate PLUS a fill length-scale
+    # block. Scalar theta_bounds supply only one coordinate, so the fill block would get size 0
+    # and the bounds would be misassigned to `power`. It must fail loudly with a clear message
+    # rather than silently producing a degenerate problem (the historical crash).
+    X, y = _data(d=2)
+    with pytest.raises(ValueError, match="needs at least"):
+        DaceProblem(X, y, CONST, GeneralizedExponential(), theta_bounds=(0.0, 100.0))
+
+
+def test_map_prior_spares_generalized_exponential_power_coordinate():
+    # the MAP prior regularizes only the length-scale (fill) coordinate, never the fixed `power`
+    # shape coordinate. So vs a no-prior problem the gradient is identical in the `power` column
+    # but differs in the length-scale column.
+    X, y = _data(d=2)
+    tb = (np.array([0.05, 1.0]), np.array([10.0, 3.0]))  # [length-scale, power] value bounds
+    base = DaceProblem(X, y, CONST, GeneralizedExponential(), theta_bounds=tb)
+    mapp = DaceProblem(X, y, CONST, GeneralizedExponential(), theta_bounds=tb, theta_prior=(0.0, 0.1))
+    x = np.array([[0.3, np.log10(1.5)]])  # [log10 length-scale, log10 power]
+    eb, em = base(x), mapp(x)
+    assert np.isclose(eb.grad[0, 1], em.grad[0, 1])  # power coordinate untouched by the prior
+    assert not np.isclose(eb.grad[0, 0], em.grad[0, 0])  # length-scale IS penalized
 
 
 def _data(n=18, d=2, seed=0):
