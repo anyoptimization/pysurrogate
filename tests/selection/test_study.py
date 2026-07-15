@@ -1,6 +1,7 @@
 """Tests for the function-sampling study harness and the analytic test functions."""
 
 import numpy as np
+import pytest
 
 from pysurrogate.models import RBF, SimpleMean
 from pysurrogate.selection import StudyResult, study
@@ -53,12 +54,8 @@ def test_get_test_function_bounds_shape():
 
 
 def test_get_test_function_rejects_unknown():
-    try:
+    with pytest.raises(ValueError):
         get_test_function("not_a_function")
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("unknown test function should raise")
 
 
 def test_study_ranks_rbf_above_mean_on_sphere():

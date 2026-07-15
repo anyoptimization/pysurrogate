@@ -296,6 +296,104 @@ def test_boxmin_populates_the_visited_trajectory():
     assert all(isinstance(x, np.ndarray) for x in box.visited)
 
 
+class CountingSphere(Sphere):
+    """Sphere that counts every evaluated row, to audit probe/eval accounting."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.n_rows = 0
+
+    def __call__(self, X):
+        self.n_rows += len(np.atleast_2d(np.asarray(X, float)))
+        return super().__call__(X)
+
+
+def test_restart_honors_inner_callback_early_stop():
+    # a patience-exhausted callback must stop the WHOLE restart loop, not just the current
+    # inner run -- and the stop reason must surface on the Restart result.
+    prob = CountingSphere(dim=2, center=[1.0, 1.0])
+    free = Restart(LBFGS(), Sampling(6, LHS())).minimize(CountingSphere(dim=2, center=[1.0, 1.0]))
+    opt = Restart(LBFGS(), Sampling(6, LHS())).setup(prob, callback=Callback(patience=1))
+    res = opt.run()
+    assert "callback" in res.message
+    assert opt.n_iter < 6  # remaining starts were not launched
+    assert res.n_evals < free.n_evals
+
+
+def test_problem_has_grad_probe_is_cached_per_instance():
+    prob = CountingSphere(dim=2)
+    assert prob.has_grad is True
+    assert prob.has_grad is True  # second access must not re-evaluate
+    assert prob.n_rows == 1
+
+
+def test_restart_multistart_probes_gradient_support_once():
+    # L-BFGS asks the problem for gradient support via the cached has_grad, so a 10-start
+    # Restart adds exactly ONE uncounted probe evaluation -- probes no longer multiply per start.
+    prob = CountingSphere(dim=2, center=[1.0, -1.0])
+    res = Restart(LBFGS(), Sampling(10, LHS())).minimize(prob)
+    assert prob.n_rows == res.n_evals + 1  # every row accounted for, plus the single probe
+
+
+class WindowedSphere(Sphere):
+    """Sphere whose finite sampling window is narrower than its hard bounds."""
+
+    @property
+    def sampling_bounds(self):
+        return np.full(len(self._lo), -1.0), np.full(len(self._lo), 1.0)
+
+
+def test_warm_start_outside_sampling_window_competes_unclipped():
+    # x0 = [4, 4] lies outside the [-1, 1] sampling window but inside the hard [-5, 5] bounds:
+    # it must be evaluated EXACTLY as given, not clipped into the window.
+    prob = WindowedSphere(dim=2, center=[4.0, 4.0])
+    x0 = np.array([4.0, 4.0])
+    seen = []
+
+    class Recording(Callback):
+        def score(self, x, f, info):
+            seen.append(np.array(x, float))
+            return super().score(x, f, info)
+
+    res = Restart(LBFGS(), Sampling(4, LHS()), random_state=0).minimize(prob, x0=x0, callback=Recording())
+    assert any(np.array_equal(s, x0) for s in seen)  # the warm start itself was evaluated, unclipped
+    assert res.f < 1e-6
+
+
+def test_warm_start_is_clipped_to_hard_bounds():
+    # an out-of-bounds x0 is clipped to the HARD bounds before it competes
+    prob = WindowedSphere(dim=2, center=[4.0, 4.0])
+    starts = LBFGS().setup(prob, x0=np.array([7.0, 7.0]))._starts
+    assert np.array_equal(starts[0], [5.0, 5.0])
+
+
+def test_boxmin_counts_relocation_evaluations():
+    from pysurrogate.optimizer import Boxmin
+
+    class Relocating(CountingSphere):
+        """Infeasible below x[0] = 2, so a low start forces relocation probes."""
+
+        def __call__(self, X):
+            ev = super().__call__(X)
+            feas = np.atleast_2d(np.asarray(X, float))[:, 0] >= 2.0
+            return Evaluation(f=np.where(feas, ev.f, np.inf), feasible=feas, grad=ev.grad, info=ev.info)
+
+    prob = Relocating(dim=2, center=[3.0, 0.0])
+    box = Boxmin()
+    box.minimize(prob, x0=np.array([-4.0, 0.0]))
+    assert box.n_evals == prob.n_rows  # relocation probes are part of the reported budget
+
+
+def test_terminal_message_set_on_normal_completion():
+    from pysurrogate.optimizer import Boxmin
+
+    assert "converged" in LBFGS().minimize(Sphere(dim=2), x0=np.zeros(2)).message
+    assert "completed" in Restart(LBFGS(), Sampling(3, LHS())).minimize(Sphere(dim=2)).message
+    assert "max steps" in Adam(steps=3).minimize(Sphere(dim=2)).message
+    assert "step < tol" in PatternSearch(tol=1e-2).minimize(Sphere(dim=2)).message
+    assert "completed" in Boxmin().minimize(Sphere(dim=2), x0=np.zeros(2)).message
+
+
 def test_setup_resets_visited_between_runs():
     from pysurrogate.optimizer import Boxmin
 

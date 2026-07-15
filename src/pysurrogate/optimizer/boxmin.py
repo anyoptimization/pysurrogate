@@ -29,11 +29,11 @@ class Boxmin(Optimizer):
     requires_x0 = True  # a pattern search needs a starting point (the warm theta)
 
     def _setup(self):
-        lo, hi = (np.atleast_1d(np.asarray(b, float)) for b in self.problem.bounds)
+        lo, hi, _, _ = self._box()
         self._lo, self._hi = lo, hi
         p = len(lo)
         self._p = p
-        x = np.clip(np.array(self.x0, float), lo, hi)
+        x = self._seed_starts(None)[0]  # requires_x0: the warm start, clipped to the hard bounds
         # additive per-coordinate step == log10(Boxmin's D), with D = 2 ** (arange(1, p+1) / (p+2))
         s = (np.arange(1, p + 1) / (p + 2)) * _LOG10_2
         eq = lo == hi  # an equality bound pins that coordinate (Boxmin's D[ee] = 1, theta = upper)
@@ -50,13 +50,14 @@ class Boxmin(Optimizer):
         self._kmax = 2 if p <= 2 else min(p, 4)
         self._k = 0
         self._ok = np.isfinite(self._f)  # only run the pattern moves from a feasible start
-        self.message = "completed"
 
     def _relocate(self, x):
         """Move the start up toward ``hi`` (``theta *= 2`` per step) until it is feasible."""
         t = x.copy()
         for _ in range(64):
-            if bool(self.problem(np.atleast_2d(t)).feasible[0]):
+            ev = self.problem(np.atleast_2d(t))
+            self.n_evals += 1  # feasibility probes are real evaluations; keep the budget honest
+            if bool(ev.feasible[0]):
                 return t
             nxt = np.minimum(t + _LOG10_2, self._hi)  # theta *= 2 toward the upper bound
             if np.all(nxt == t):
@@ -66,14 +67,12 @@ class Boxmin(Optimizer):
 
     def _record(self, x):
         """Evaluate ``x``, append it to the trajectory, report a feasible point to the callback."""
-        ev = self.problem(np.atleast_2d(x))
+        X = np.atleast_2d(x)
+        ev = self.problem(X)
         self.n_evals += 1
         self.visited.append(np.array(x, float))
-        f = float(ev.f[0])
-        if bool(ev.feasible[0]):
-            self._emit(x, f, ev.info[0] if ev.info is not None else None)
-            return f
-        return np.inf
+        self._emit_batch(X, ev)
+        return float(ev.f[0]) if bool(ev.feasible[0]) else np.inf
 
     def _try(self, tt):
         """Evaluate a candidate; adopt it as the incumbent if it lowers the (MLE) objective."""
@@ -85,12 +84,17 @@ class Boxmin(Optimizer):
 
     def _advance(self):
         if not self._ok or self._k >= self._kmax:
+            self.message = "completed"
             return False
         self._k += 1
         last_x = self._x.copy()
         self._explore()
         self._move(last_x)
-        return self._k < self._kmax
+        if self._k >= self._kmax:
+            if not self.is_done:  # a callback stop mid-sweep keeps its own message
+                self.message = "completed"
+            return False
+        return True
 
     def _explore(self):
         # probe each searched coordinate up by one step (halved at a bound), then down if that did

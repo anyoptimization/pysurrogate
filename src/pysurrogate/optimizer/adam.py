@@ -39,31 +39,18 @@ class Adam(Optimizer):
             raise ValueError("Adam requires a problem that returns an analytic gradient.")
         # hard bounds clip the descent (may be +/-inf); seed the population from the finite
         # sampling region, since an infinite box cannot be uniformly sampled.
-        lo, hi, slo, shi = self._box()
+        lo, hi, _, _ = self._box()
         self._lo, self._hi = lo, hi
-        rng = np.random.default_rng(self.random_state)
-        if self.sampling is not None:
-            extra = [self.x0] if self.x0 is not None else []
-            self._pop = self.sampling.sample((slo, shi), rng, include=extra)
-        else:
-            pop = [] if self.x0 is None else [np.clip(self.x0, lo, hi)]
-            while len(pop) < self.pop_size:
-                pop.append(rng.uniform(slo, shi))
-            self._pop = np.array(pop[: self.pop_size])
+        self._pop = self._seed_starts(self.sampling, self.random_state, n=self.pop_size, fill="uniform")
         self._m = np.zeros_like(self._pop)
         self._v = np.zeros_like(self._pop)
-        self.message = "completed (max steps)"
 
     def _advance(self):
         ev = self.problem(self._pop)
         self.n_evals += len(self._pop)
         # gradient support was verified in _setup (fail-fast), so ev.grad is present here.
-
-        for i in range(len(self._pop)):
-            if bool(ev.feasible[i]):
-                info = ev.info[i] if ev.info is not None else None
-                if self._emit(self._pop[i], float(ev.f[i]), info):
-                    return False
+        if self._emit_batch(self._pop, ev):
+            return False
 
         # one Adam step over the population. Zero the gradient of infeasible candidates -- the
         # Evaluation contract does not promise a finite grad for an infeasible row, and a NaN there
@@ -78,4 +65,7 @@ class Adam(Optimizer):
         mhat = self._m / (1 - b1**t)
         vhat = self._v / (1 - b2**t)
         self._pop = np.clip(self._pop - self.lr * mhat / (np.sqrt(vhat) + eps), self._lo, self._hi)
-        return self.n_iter < self.steps
+        if self.n_iter >= self.steps:
+            self.message = "completed (max steps)"
+            return False
+        return True
