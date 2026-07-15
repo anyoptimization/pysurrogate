@@ -23,12 +23,8 @@ def test_cartesian_names_and_count():
 
 
 def test_cartesian_rejects_duplicate_tokens():
-    try:
+    with pytest.raises(ValueError):
         cartesian(RBF, kernel=["cubic", "cubic"])
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("duplicate axis tokens should raise")
 
 
 def test_benchmark_ranks_real_model_above_mean_baseline():
@@ -99,6 +95,11 @@ def test_model_selection_picks_and_refits_best():
     pred = sel.predict(X[:5])
     assert pred.y.shape == (5, 1) and np.all(np.isfinite(pred.y))
     assert list(sel.statistics())[0] == "rbf"
+
+
+def test_automodel_statistics_empty_before_fit():
+    # before fit there is no ranking yet -> an empty dict, not None (callers can iterate safely)
+    assert AutoModel({"mean": SimpleMean()}).statistics() == {}
 
 
 def test_model_selection_defaults_to_recommended_fleet():

@@ -1,6 +1,7 @@
 """Tests for the metrics registry: plain error, ranking, selection, and calibration."""
 
 import numpy as np
+import pytest
 
 from pysurrogate.selection import metrics
 
@@ -31,12 +32,8 @@ def test_nlpd_rewards_honest_uncertainty():
 
 def test_probabilistic_metric_requires_sigma():
     y, y_hat = np.zeros(3), np.ones(3)
-    try:
+    with pytest.raises(ValueError, match="requires sigma"):
         metrics.calc_metric("nlpd", y, y_hat)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("nlpd without sigma should raise")
 
 
 def test_ranking_is_monotone_invariant():

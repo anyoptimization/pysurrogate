@@ -7,7 +7,7 @@ from pysurrogate.dace import Exponential, Gaussian, Matern, RationalQuadratic
 from pysurrogate.models import KNN, KPLS, RBF, SVR, InverseDistanceWeighting, Kriging, SimpleMean
 from pysurrogate.selection.benchmark import FunctionBenchmark, score
 from pysurrogate.selection.factory import as_named, cartesian
-from pysurrogate.selection.metrics import POINT, POINT_METRICS, metric_names, metric_sort_key
+from pysurrogate.selection.metrics import POINT, metric_names, metric_sort_key
 
 
 def default_kriging():
@@ -88,10 +88,10 @@ class StudyResult:
         return {name: self._agg(self._finite(v.get(metric, [])), np.std) for name, v in self.raw.items()}
 
     def metrics(self):
-        """All metric names that were collected (point metrics first)."""
+        """All metric names that were collected, in registry order (unregistered names last)."""
         seen = {m for v in self.raw.values() for m in v}
-        ordered = [m for m in POINT_METRICS if m in seen]
-        return ordered + [m for m in seen if m not in ordered]
+        ordered = [m for m in metric_names() if m in seen]
+        return ordered + sorted(seen.difference(ordered))
 
     def ranking(self):
         """Mean rank of each model across all metrics (direction-aware; lower is better)."""

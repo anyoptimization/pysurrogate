@@ -1,6 +1,7 @@
 """Tests for FunctionBenchmark: predictions-DataFrame schema, roles, and groupby scoring."""
 
 import numpy as np
+import pytest
 
 from pysurrogate.core.sampling import LHS, Random, Sampling
 from pysurrogate.dace import Gaussian
@@ -70,6 +71,25 @@ def test_replications_axis():
     t0 = df.query("rep == 0 and role == 'test' and model == 'krig'")["x0"].to_numpy()
     t1 = df.query("rep == 1 and role == 'test' and model == 'krig'")["x0"].to_numpy()
     assert not np.array_equal(t0, t1)
+
+
+def test_predict_failure_is_guarded_like_fit_failure():
+    # regression: a model that fits but then fails to PREDICT used to abort the whole run;
+    # it must count as a failure for that replication and leave the other models' rows intact.
+    class PredictFails(SimpleMean):
+        def _predict(self, X, var=False, grad=False):
+            raise RuntimeError("boom")
+
+    f, xl, xu = get_test_function("sphere", n_var=2)
+    models = {"bad": PredictFails(), "mean": SimpleMean()}
+    bench = FunctionBenchmark(f, xl, xu, models, train=Sampling(20, LHS()), test=Sampling(50, Random()), random_state=0)
+    df = bench.run()
+    assert bench.failures["bad"] == 1
+    assert bench.failures["mean"] == 0
+    assert set(df["model"]) == {"mean"}  # no partial rows from the failing model
+
+    with pytest.raises(RuntimeError, match="boom"):
+        FunctionBenchmark(f, xl, xu, {"bad": PredictFails()}, train=Sampling(20, LHS()), raise_exception=True).run()
 
 
 def test_generalization_gap_diagnostic():

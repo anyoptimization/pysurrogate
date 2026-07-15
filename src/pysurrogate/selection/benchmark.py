@@ -17,6 +17,7 @@ from pysurrogate.selection.metrics import (
     get_metric,
     metric_sort_key,
 )
+from pysurrogate.util.misc import at_least2d
 
 # ---------------------------------------------------------------------------------------------
 # FunctionBenchmark -- sample a known function, fit models, emit a tidy predictions DataFrame
@@ -104,16 +105,20 @@ class FunctionBenchmark:
 
             for name, proto in self.models.items():
                 model = copy.deepcopy(proto)
+                # one guard around fit AND predict: a model that fits but cannot predict is just as
+                # failed for this replication -- count it and skip, contributing no partial rows.
                 try:
                     model.fit(Xtr, ytr_fit)
+                    rows = [
+                        predictions_frame(X, y, model.predict(X, var=True), rep=rep, model=name, role=role)
+                        for role, (X, y) in data.items()
+                    ]
                 except Exception:
                     if self.raise_exception:
                         raise
                     self.failures[name] += 1
                     continue
-                for role, (X, y) in data.items():
-                    pred = model.predict(X, var=True)
-                    blocks.append(predictions_frame(X, y, pred, rep=rep, model=name, role=role))
+                blocks.extend(rows)
         if not blocks:
             # every model failed to fit on every replication -> nothing to concatenate. Raise a
             # clear message instead of pandas' opaque "No objects to concatenate" from concat([]).
@@ -187,11 +192,26 @@ class Benchmark:
         self.records = None
 
     def do(self, X, y, partitions=None, optimize=True):
-        from pysurrogate.util.misc import at_least2d
+        """Cross-validate every prototype on ``(X, y)`` and record the per-fold metric scores.
 
+        Args:
+            X: Input points, shape ``(n, d)`` (a 1-D input is promoted to one row).
+            y: Target values, shape ``(n,)`` (a 2-D column is flattened).
+            partitions: Explicit train/test splits to use; ``None`` uses the configured
+                partitioning (default: 3-fold cross-validation).
+            optimize: Forwarded to every model's ``fit`` (``False`` skips hyperparameter search).
+
+        Returns:
+            ``self``, with :attr:`records` populated -- so ``do(...)`` chains into
+            :meth:`results` / :meth:`frame`.
+
+        Raises:
+            ValueError: If ``X`` and ``y`` disagree in length.
+        """
         X = at_least2d(np.asarray(X, dtype=float), expand="r")
         y = at_least2d(np.asarray(y, dtype=float), expand="c")[:, 0]
-        assert len(X) == len(y)
+        if len(X) != len(y):
+            raise ValueError(f"X and y must have the same length, got {len(X)} vs {len(y)}.")
 
         if partitions is None:
             # 3-fold (not the canonical 5) on purpose: model-SELECTION screens many candidates, so
@@ -397,12 +417,10 @@ class AutoModel(Model):
 
     def history(self):
         """Return the winner's prequential validation log (see :meth:`Model.history`)."""
-        import pandas as pd  # type: ignore[import-untyped]
-
         return pd.DataFrame() if self.model is None else self.model.history()
 
     def statistics(self):
-        """Return a ``{model_name: score}`` dict of the ranking metric, best first."""
+        """Return a ``{model_name: score}`` dict of the ranking metric, best first (empty before fit)."""
         if self.ranking is None:
-            return None
+            return {}
         return {r["label"]: r["performance"][self.sorted_by]["mean"] for r in self.ranking}

@@ -90,11 +90,16 @@ class Problem(ABC):
         Lets a gradient-based optimizer (e.g. :class:`~pysurrogate.optimizer.adam.Adam`) detect
         gradient support up front and fail fast in ``setup`` instead of mid-search. The default
         evaluates one central point and checks whether the :class:`Evaluation` carries a ``grad``;
-        a problem that knows its answer statically can override this to skip the probe.
+        the answer is cached per instance, so repeated consumers (e.g. every restart of a
+        multi-start search) share a single probe. A problem that knows its answer statically can
+        override this to skip the probe entirely.
         """
-        slo, shi = (np.atleast_1d(np.asarray(b, float)) for b in self.sampling_bounds)
-        center = 0.5 * (slo + shi)
-        return self(center[None, :]).grad is not None
+        cached = getattr(self, "_has_grad", None)
+        if cached is None:
+            slo, shi = (np.atleast_1d(np.asarray(b, float)) for b in self.sampling_bounds)
+            center = 0.5 * (slo + shi)
+            cached = self._has_grad = self(center[None, :]).grad is not None
+        return cached
 
     def screen(self, X):
         """Cheap objective-only evaluation of a population, for ranking candidates.
@@ -140,7 +145,7 @@ class Callback:
         self.best_f = np.inf  # the optimizer's objective at ``best``
         self.best_score = np.inf  # the *selection* score at ``best`` (== best_f for MLE)
         self.best_info = None  # the problem payload at ``best`` (e.g. the fitted model)
-        self.n_seen = 0
+        self.stopped = False  # True once this callback has requested an early stop
         self._stale = 0
 
     def score(self, x, f, info):
@@ -168,13 +173,16 @@ class Callback:
         Returns:
             ``True`` to request early termination (``patience`` exhausted), else ``False``.
         """
-        self.n_seen += 1
         s = self.score(x, f, info)
         if s < self.best_score:
             self.best, self.best_f, self.best_score, self.best_info, self._stale = x, f, s, info, 0
         else:
             self._stale += 1
-        return self.patience is not None and self._stale >= self.patience
+        if self.patience is not None and self._stale >= self.patience:
+            # remembered on the callback (not just returned) so an outer orchestrator that shares
+            # this callback across several inner runs -- e.g. Restart -- can see the stop too.
+            self.stopped = True
+        return self.stopped
 
 
 @dataclass
@@ -351,6 +359,54 @@ class Optimizer(ABC):
         lo, hi = (np.atleast_1d(np.asarray(b, float)) for b in self.problem.bounds)
         slo, shi = (np.atleast_1d(np.asarray(b, float)) for b in self.problem.sampling_bounds)
         return lo, hi, slo, shi
+
+    def _seed_starts(self, sampling, random_state=None, n=1, fill="center"):
+        """Generate the run's start points: the clipped warm start plus space-filling draws.
+
+        The single place that owns the warm-start contract: a given ``x0`` is clipped to the
+        problem's **hard** bounds -- never the finite sampling window -- so a warm start outside
+        the window still competes unchanged, while the space-filling draws stay inside the finite
+        window (the only samplable box).
+
+        Args:
+            sampling: A :class:`~pysurrogate.core.sampling.Sampling` generating the starts (the
+                clipped ``x0`` force-included), or ``None`` to use the fallback fill below.
+            random_state: Seed for the draws.
+            n: Number of points the ``None``-sampling fallback returns (``x0`` counts toward it).
+            fill: How the fallback fills beyond ``x0`` -- ``"center"`` for the sampling-window
+                midpoint, ``"uniform"`` for uniform draws inside the window.
+
+        Returns:
+            Start points, shape ``(k, p)`` -- ``k = max(sampling.n, x0 given)`` with a sampling,
+            else ``n``.
+        """
+        lo, hi, slo, shi = self._box()
+        rng = np.random.default_rng(random_state)
+        forced = [] if self.x0 is None else [np.clip(self.x0, lo, hi)]
+        if sampling is not None:
+            return sampling.sample((slo, shi), rng, include=forced)
+        pts = list(forced)
+        while len(pts) < n:
+            pts.append(0.5 * (slo + shi) if fill == "center" else rng.uniform(slo, shi))
+        return np.array(pts[:n])
+
+    def _emit_batch(self, X, ev):
+        """Report every feasible candidate of a batch :class:`Evaluation` to the callback.
+
+        Args:
+            X: The evaluated candidates, shape ``(J, p)``.
+            ev: The :class:`Evaluation` the problem returned for ``X``.
+
+        Returns:
+            ``True`` if the callback requested an early stop (the caller should bail out of the
+            current iteration), else ``False``.
+        """
+        for i in range(len(X)):
+            if bool(ev.feasible[i]):
+                info = ev.info[i] if ev.info is not None else None
+                if self._emit(X[i], float(ev.f[i]), info):
+                    return True
+        return False
 
     def _setup(self):
         """Optional hook for problem-dependent preparation, run at the end of :meth:`setup`.

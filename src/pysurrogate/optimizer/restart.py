@@ -38,10 +38,7 @@ class Restart(Optimizer):
     def _setup(self):
         # seed candidates from the FINITE sampling region; the inner optimizer's descent is
         # constrained by the problem's hard bounds, which may be unbounded above.
-        _, _, slo, shi = self._box()
-        rng = np.random.default_rng(self.random_state)
-        extra = [self.x0] if self.x0 is not None else []
-        cand = self.sampling.sample((slo, shi), rng, include=extra)
+        cand = self._seed_starts(self.sampling, self.random_state)
 
         if self.screen is not None and self.screen < len(cand):
             # cheap objective-only rank, then keep the best `screen` as the starts to polish
@@ -51,10 +48,10 @@ class Restart(Optimizer):
 
         self._starts = list(cand)
         self._next = 0
-        self.message = "completed"
 
     def _advance(self):
-        if self._next >= len(self._starts):
+        if self._next >= len(self._starts):  # no starts at all (e.g. an empty sampling)
+            self.message = "completed"
             return False
         start = self._starts[self._next]
         self._next += 1
@@ -63,4 +60,12 @@ class Restart(Optimizer):
         run = self.inner.setup(self.problem, x0=start, callback=self.callback)
         run.run()
         self.n_evals += run.n_evals
-        return self._next < len(self._starts)
+        if self.callback.stopped:
+            # the shared callback asked the inner run to stop early -- honor it here too instead
+            # of launching the remaining starts, and surface the inner run's reason.
+            self.message = run.message
+            return False
+        if self._next >= len(self._starts):
+            self.message = "completed"
+            return False
+        return True

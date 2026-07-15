@@ -40,19 +40,19 @@ class PatternSearch(Optimizer):
         lo, hi, slo, shi = self._box()
         self._lo, self._hi, self._width, self._p = lo, hi, shi - slo, len(lo)
         # no warm start -> begin at the sampling-region center (this is a local search; it needs a point)
-        self._x = 0.5 * (slo + shi) if self.x0 is None else np.clip(self.x0, lo, hi)
+        self._x = self._seed_starts(None)[0]
         self._step = self.init_step
         # evaluate the incumbent; if it is infeasible we still march -- a neighbor may be feasible.
-        ev = self.problem(np.atleast_2d(self._x))
+        X = np.atleast_2d(self._x)
+        ev = self.problem(X)
         self.n_evals += 1
         self._f = float(ev.f[0])
-        if bool(ev.feasible[0]):
-            self._emit(self._x, self._f, ev.info[0] if ev.info is not None else None)
-        self.message = "converged (step < tol)"
+        self._emit_batch(X, ev)
 
     def _advance(self):
         # one iteration = one poll of the 2p axial neighbors, scored in a single batched call
         if self._step < self.tol:
+            self.message = "converged (step < tol)"
             return False
         if self.n_iter >= self.max_iter:
             self.message = "stopped (max_iter)"
@@ -63,19 +63,18 @@ class PatternSearch(Optimizer):
         ev = self.problem(cand)
         self.n_evals += len(cand)
 
-        best_f, best_x = self._f, None
-        for i in range(len(cand)):
-            if not bool(ev.feasible[i]):
-                continue
-            fi = float(ev.f[i])
-            if self._emit(cand[i], fi, ev.info[i] if ev.info is not None else None):
-                return False
-            if fi < best_f:
-                best_f, best_x = fi, cand[i]
+        if self._emit_batch(cand, ev):
+            return False
 
-        if best_x is not None:
-            self._x, self._f = best_x, best_f  # successful poll -> move, optionally grow the step
+        # move to the best improving feasible neighbor (first minimum on ties, like the old scan)
+        f = np.where(ev.feasible, np.asarray(ev.f, float), np.inf)
+        j = int(np.argmin(f))
+        if f[j] < self._f:
+            self._x, self._f = cand[j], float(f[j])  # successful poll -> move, optionally grow
             self._step *= self.grow
         else:
             self._step *= self.shrink  # no improvement -> contract toward the incumbent
-        return self._step >= self.tol
+        if self._step < self.tol:
+            self.message = "converged (step < tol)"
+            return False
+        return True

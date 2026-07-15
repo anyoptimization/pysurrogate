@@ -65,15 +65,16 @@ class Sampling:
 
         Returns:
             An array of start points, shape ``(max(n, #forced), p)``, every forced point present
-            (clipped into the box) followed by the space-filling draws.
+            **exactly as given** followed by the space-filling draws. Forced points are *not*
+            clipped into ``bounds``: the box here is often a finite sampling window inside wider
+            hard bounds, and a warm start outside the window must survive unchanged -- the caller
+            owns the feasibility of its forced points (see ``Optimizer._seed_starts``).
         """
         lo, hi = (np.atleast_1d(np.asarray(b, float)) for b in bounds)
         p = len(lo)
         rng = np.random.default_rng() if rng is None else rng
 
-        forced = [
-            np.clip(x, lo, hi) for x in (self.include + [np.atleast_1d(np.asarray(x, float)) for x in (include or [])])
-        ]
+        forced = self.include + [np.atleast_1d(np.asarray(x, float)) for x in (include or [])]
         n_fill = max(self.n - len(forced), 0)
         pts = list(forced)
         if n_fill > 0:

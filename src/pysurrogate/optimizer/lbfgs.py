@@ -22,12 +22,12 @@ class LBFGS(Optimizer):
     the exact Jacobian (what makes it fast); otherwise scipy falls back to a finite-difference
     gradient. The problem is evaluated one point at a time (``J = 1``).
 
-    Multi-start is not built in -- it is :class:`~pysurrogate.core.sampling.Sampling`'s job. Pass
-    a ``sampling`` and L-BFGS runs one local descent from each sampled start, the ``x0`` (when
-    known) force-included so the warm start always competes; the *callback* keeps the best across
-    all of them. With no ``sampling``, it is a single descent from ``x0`` (or the box center if
-    ``x0`` is unknown). One iteration is one full local descent, so multi-start is many iterations
-    -- which lets a driver race it.
+    Multi-start is delegated to :class:`~pysurrogate.core.sampling.Sampling` rather than being a
+    bespoke L-BFGS feature: pass a ``sampling`` and L-BFGS runs one local descent from each
+    sampled start, the ``x0`` (when known) force-included so the warm start always competes; the
+    *callback* keeps the best across all of them. With no ``sampling``, it is a single descent
+    from ``x0`` (or the box center if ``x0`` is unknown). One iteration is one full local descent,
+    so multi-start is many iterations -- which lets a driver race it.
 
     Args:
         sampling: A :class:`~pysurrogate.core.sampling.Sampling` that generates the starts, or
@@ -50,8 +50,7 @@ class LBFGS(Optimizer):
 
     def _setup(self):
         # one ITERATION here is one full local descent from one start; multi-start = many iters.
-        lo, hi, slo, shi = self._box()
-        self._lo, self._hi = lo, hi
+        lo, hi, _, _ = self._box()
         # scipy L-BFGS-B wants None (not +/-inf) for an absent bound -- an inf passed through can
         # stall the bounded descent -- so translate each non-finite hard bound to None.
         self._bounds = [
@@ -59,34 +58,27 @@ class LBFGS(Optimizer):
         ]
         # seed starts from the FINITE sampling region (an infinite hard box cannot be sampled);
         # the descent below is still free to leave it, constrained only by the hard bounds.
-        if self.sampling is not None:
-            rng = np.random.default_rng(self.random_state)
-            extra = [self.x0] if self.x0 is not None else []
-            self._starts = list(self.sampling.sample((slo, shi), rng, include=extra))
-        elif self.x0 is not None:
-            self._starts = [np.clip(self.x0, lo, hi)]
-        else:
-            self._starts = [0.5 * (slo + shi)]  # local search needs a point; center when none given
+        self._starts = list(self._seed_starts(self.sampling, self.random_state))
         self._next = 0
-        self._jac = self.problem(np.atleast_2d(self._starts[0])).grad is not None
-        self.message = "converged"
+        self._jac = self.problem.has_grad
 
     def _fun(self, x):
-        ev = self.problem(np.atleast_2d(np.asarray(x, float)))
+        X = np.atleast_2d(np.asarray(x, float))
+        ev = self.problem(X)
         self.n_evals += 1
         f, feasible = float(ev.f[0]), bool(ev.feasible[0])
-        info = ev.info[0] if ev.info is not None else None
         grad = ev.grad[0] if ev.grad is not None else None
         # only feasible candidates reach the callback (selection sees real fits only); an
         # infeasible point is handed back to scipy as a finite penalty so it retreats.
-        if feasible and self._emit(x, f, info):
+        if self._emit_batch(X, ev):
             raise _Stop
         if grad is None:
             return f if feasible else _INFEASIBLE
         return (f if feasible else _INFEASIBLE), (grad if feasible else np.zeros_like(grad))
 
     def _advance(self):
-        if self._next >= len(self._starts):
+        if self._next >= len(self._starts):  # no starts at all (e.g. an empty sampling)
+            self.message = "converged"
             return False
         s = self._starts[self._next]
         self._next += 1
@@ -94,4 +86,7 @@ class LBFGS(Optimizer):
             minimize(self._fun, s, method="L-BFGS-B", jac=self._jac, bounds=self._bounds, options=self.options)
         except _Stop:
             return False  # callback asked to stop; _emit already flagged is_done
-        return self._next < len(self._starts)  # more starts -> more iterations
+        if self._next >= len(self._starts):
+            self.message = "converged"
+            return False
+        return True  # more starts -> more iterations

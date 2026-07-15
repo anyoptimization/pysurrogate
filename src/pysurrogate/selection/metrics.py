@@ -249,9 +249,6 @@ for _m in [
 # Public API
 # --------------------------------------------------------------
 
-# Point metrics safe to compute from (y, y_hat) alone — the holistic benchmark default.
-POINT_METRICS = [name for name, m in _REGISTRY.items() if m.kind == POINT]
-
 
 def get_metric(metric) -> Metric:
     """Resolve a metric name (or pass through a ``Metric``) to a ``Metric`` object."""
@@ -302,6 +299,10 @@ def metric_names(family: Optional[str] = None, kind: Optional[str] = None) -> li
         for name, m in _REGISTRY.items()
         if (family is None or m.family == family) and (kind is None or m.kind == kind)
     ]
+
+
+# Point metrics safe to compute from (y, y_hat) alone — the holistic benchmark default.
+POINT_METRICS = metric_names(kind=POINT)
 
 
 def evaluate(y, y_hat, sigma=None, names=None) -> dict:

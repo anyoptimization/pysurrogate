@@ -40,10 +40,7 @@ def is_duplicate(X, eps=1e-16):
     """
     D = euclidean_dist(X, X)
     D[np.triu_indices(len(X))] = np.inf
-
-    mask = np.full(len(X), False)
-    mask[np.any(D < eps, axis=1)] = True
-    return mask
+    return np.any(D < eps, axis=1)
 
 
 def discretize(X, n_partitions, xl=None, xu=None):
@@ -58,12 +55,15 @@ def discretize(X, n_partitions, xl=None, xu=None):
         xu: Per-dimension upper bound, or ``None`` to take the column maxima of ``X``.
 
     Returns:
-        Integer bin indices in ``[0, n_partitions)``, same shape as ``X``.
+        Integer bin indices in ``[0, n_partitions)``, same shape as ``X``. Values below ``xl``
+        (or above ``xu``) clamp to the first (or last) bin; a zero-range dimension
+        (``xl == xu``) maps everything to bin 0.
     """
-    if xl is None:
-        xl = X.min(axis=0)
-    if xu is None:
-        xu = X.max(axis=0)
+    X = np.asarray(X, dtype=float)
+    xl = X.min(axis=0) if xl is None else np.asarray(xl, dtype=float)
+    xu = X.max(axis=0) if xu is None else np.asarray(xu, dtype=float)
 
-    thresholds = np.linspace(xl, xu, n_partitions + 1)[1:]
-    return (X[..., None] < thresholds.T).argmax(axis=-1)
+    span = xu - xl
+    span = np.where(span > 0, span, 1.0)  # zero-range dim: avoid 0/0, everything lands in bin 0
+    bins = np.floor((X - xl) / span * n_partitions).astype(int)
+    return np.clip(bins, 0, n_partitions - 1)
