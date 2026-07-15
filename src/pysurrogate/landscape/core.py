@@ -41,13 +41,22 @@ class Landscape:
         X: Inputs, shape ``(n, d)``.
         y: Outputs, shape ``(n,)`` (minimization objective; lower is better).
         seed: Seed for any randomized feature.
-        strict: When ``True`` a failing family re-raises instead of being skipped with a warning.
+        strict: When ``True`` a failing family re-raises instead of being skipped with a warning,
+            and non-finite (nan/inf) ``X``/``y`` is rejected up front rather than yielding nan
+            features.
 
     Attributes:
         ctx: The shared :class:`Context` all families read from.
     """
 
     def __init__(self, X: Any, y: Any, seed: int = 0, strict: bool = False) -> None:
+        if strict and not (
+            np.all(np.isfinite(np.asarray(X, dtype=float))) and np.all(np.isfinite(np.asarray(y, dtype=float)))
+        ):
+            # families don't raise on non-finite inputs -- they quietly emit inf/nan features -- so
+            # strict must check finiteness up front, else strict=True gives false confidence on the
+            # very inputs a caller most wants flagged.
+            raise ValueError("Landscape(strict=True) requires all-finite X and y (got nan/inf).")
         self.ctx = Context(X, y, seed=seed)
         self._groups: dict[str, dict[str, float]] = {}
         for name in FAMILIES:

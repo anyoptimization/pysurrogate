@@ -185,6 +185,12 @@ def crps_gaussian(y, y_hat, sigma):
 def coverage(y, y_hat, sigma, level=0.9):
     """Empirical fraction of points inside the central ``level`` predictive interval."""
     s = _safe_sigma(sigma)
+    # a model without predictive uncertainty passes an all-NaN sigma; the <= comparison below would
+    # silently read NaN as False and return a spurious 0.0 (and calibration_error a spurious 0.9),
+    # unlike the arithmetic metrics (nlpd/crps) that propagate NaN. Propagate it here too so a
+    # sigma-less model is excluded from calibration rankings rather than scored on nothing.
+    if not np.all(np.isfinite(s)):
+        return float("nan")
     half = norm.ppf(0.5 + level / 2) * s
     return np.mean(np.abs(y - y_hat) <= half)
 

@@ -96,6 +96,8 @@ class RBF(Model):
         self.kernel = _KERNELS[kernel]
 
     def _fit(self, X, y, optimize=True, **kwargs):
+        if y.shape[1] != 1:
+            raise ValueError(f"RBF supports a single output, got {y.shape[1]}; fit one model per output.")
         rho, tail, kernel, sigma, normalized = self.rho, self.tail, self.kernel, self.sigma, self.normalized
 
         # tune sigma only when the model is configured to, the fit-time flag allows it, AND the
