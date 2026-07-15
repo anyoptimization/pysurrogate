@@ -1,5 +1,7 @@
 """Shared base for the Model adapters over the ``Dace`` engine (Kriging, KPLS, RotatedKriging)."""
 
+from typing import Callable, Optional
+
 import numpy as np
 
 from pysurrogate.core.model import Model
@@ -26,8 +28,10 @@ class DaceBackedModel(Model):
     ``None`` when the subclass builds its kernel itself) and implement ``_fit``.
     """
 
-    default_regr = None  # factory for the trend when regr=None; subclass supplies
-    default_corr = None  # factory for the kernel when corr=None; None -> subclass builds its own
+    # factory for the trend when regr=None (subclass supplies); None -> no default
+    default_regr: Optional[Callable[[], object]] = None
+    # factory for the kernel when corr=None; None -> subclass builds its own
+    default_corr: Optional[Callable[[], object]] = None
 
     def __init__(self, regr=None, corr=None, selection=None, **kwargs):
         # default on, but a user override wins -- passing eliminate_duplicates=False must not
