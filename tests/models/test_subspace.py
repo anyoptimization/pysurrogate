@@ -52,6 +52,20 @@ def test_active_subspace_is_deterministic():
     np.testing.assert_array_equal(a1, a2)
 
 
+def test_rotated_kriging_respects_active_dims_on_fit_refit_and_predict():
+    # regression (DaceBackedModel._refit): the active subspace is estimated on the selected columns
+    # only; refit previously bypassed preprocess and handed full-width raw inputs to the engine.
+    rng = np.random.RandomState(3)
+    X = rng.uniform(-1, 1, size=(50, 5))
+    y = (np.sin(3.0 * (X[:, [0]] + X[:, [2]]))).reshape(-1, 1)  # varies only in dims 0 and 2
+    model = RotatedKriging(active_dims=[0, 2]).fit(X, y, optimize=False)
+    assert model.X.shape[1] == 2  # rotation/engine saw only the 2 active dims
+    Xnew = rng.uniform(-1, 1, size=(8, 5))
+    ynew = (np.sin(3.0 * (Xnew[:, [0]] + Xnew[:, [2]]))).reshape(-1, 1)
+    model.refit(Xnew, ynew, optimize=False)  # must not raise despite full-width raw inputs
+    assert np.all(np.isfinite(model.predict(X[:5]).y))
+
+
 def test_rotated_kriging_predicts_mean_variance_and_gradient():
     X, y, _ = _ridge(50, 3, np.array([1.0, 0.7, -0.4]), seed=4)
     model = RotatedKriging(theta_bounds=(0.01, 100.0)).fit(X, y)

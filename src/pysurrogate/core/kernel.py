@@ -15,6 +15,23 @@ def _asmat(thetas):
     return np.atleast_2d(np.asarray(thetas, dtype=float))
 
 
+def pairwise_diffs(A, B):
+    """Componentwise differences between every row of ``A`` and every row of ``B``.
+
+    The one implementation of the ``repeat``/``tile`` layout every kernel path builds its
+    coordinate differences in (``calc_kernel_matrix``, ``calc_kernel_tensor``, the RBF gradient).
+
+    Args:
+        A: Left points, shape ``(nA, d)``.
+        B: Right points, shape ``(nB, d)``.
+
+    Returns:
+        The ``(nA*nB, d)`` difference matrix whose row ``i*nB + j`` is ``A[i] - B[j]`` -- ``A``
+        repeated (each row ``nB`` times) minus ``B`` tiled (``nA`` times).
+    """
+    return np.repeat(A, B.shape[0], axis=0) - np.tile(B, (A.shape[0], 1))
+
+
 def calc_kernel_matrix(A, B, func, theta):
     """Correlation matrix between the rows of ``A`` and ``B`` for one kernel at one ``theta``.
 
@@ -29,8 +46,7 @@ def calc_kernel_matrix(A, B, func, theta):
     Returns:
         The correlation matrix, shape ``(nA, nB)``.
     """
-    D = np.repeat(A, B.shape[0], axis=0) - np.tile(B, (A.shape[0], 1))
-    K = func(D, theta)
+    K = func(pairwise_diffs(A, B), theta)
     return np.reshape(K, (A.shape[0], B.shape[0]))
 
 
@@ -55,7 +71,7 @@ def calc_kernel_tensor(A, B, kernel, thetas, D=None):
         The stacked correlation matrices, shape ``(J, nA, nB)``.
     """
     if D is None:
-        D = np.repeat(A, B.shape[0], axis=0) - np.tile(B, (A.shape[0], 1))
+        D = pairwise_diffs(A, B)
     K = kernel.batch(D, thetas)
     return K.reshape(K.shape[0], A.shape[0], B.shape[0])
 
@@ -158,9 +174,11 @@ class Kernel:
         """Whether this kernel provides an analytic theta-gradient.
 
         True if it implements the ``_dtheta_per_dim`` hook (the usual path) or overrides
-        ``theta_grad`` outright (e.g. ``GeneralizedExponential``). A gradient-based
-        optimizer asks the kernel this to choose between the exact Jacobian and a
-        finite-difference fallback.
+        ``theta_grad`` outright (e.g. ``GeneralizedExponential``); False for the radial bases,
+        which are not theta-searched. This is an introspection helper -- it reports the kernel's
+        own capability (and is asserted in the gradient tests). Whether a given search uses the
+        exact Jacobian or a finite-difference fallback is the optimizer's decision, not read from
+        here.
         """
         cls = type(self)
         return cls.theta_grad is not Kernel.theta_grad or cls._dtheta_per_dim is not Kernel._dtheta_per_dim
@@ -316,9 +334,6 @@ class Exp(Profile):
 
     def fprime(self, s):
         return -np.exp(-s)
-
-    def f_batch(self, s):
-        return np.exp(-s)
 
 
 class RationalQuadraticProfile(Profile):
@@ -628,12 +643,13 @@ class GeneralizedExponential(Correlation):
     @staticmethod
     def _split(D, theta):
         """Split theta into its length-scale(s) and the shared exponent ``power``."""
+        theta = np.atleast_1d(np.asarray(theta, dtype=float))  # tolerate a 0-d / scalar theta
         d = D.shape[1]
         if len(theta) == 2:
             return theta[0], theta[1]
         if len(theta) == d + 1:
             return theta[:-1], theta[-1]
-        raise Exception(f"For GeneralizedExponential theta is either length 2 or d+1 = {d + 1}")
+        raise ValueError(f"For GeneralizedExponential theta is either length 2 or d+1 = {d + 1}, got {len(theta)}.")
 
 
 class RationalQuadratic(Correlation):
@@ -775,13 +791,11 @@ class ThinPlateSpline(RadialKernel):
 
 
 class Multiquadric(RadialKernel):
-    """Multiquadric ``sqrt(r**2 + c**2)`` with shape parameter ``c = theta`` (default 1)."""
+    """Multiquadric ``sqrt(r**2 + c**2)`` with shape parameter ``c = theta``.
 
-    def __call__(self, D, theta=1.0):
-        return super().__call__(D, theta)
-
-    def grad(self, D, theta=1.0):
-        return super().grad(D, theta)
+    ``theta`` is the offset ``c``; every call site (``calc_kernel_matrix``, the RBF gradient)
+    passes it, so the base :class:`RadialKernel` ``__call__``/``grad`` serve directly.
+    """
 
     def _phi(self, r2, theta):
         c2 = np.square(np.asarray(theta, dtype=float))
@@ -867,6 +881,11 @@ class ProjectedSquare(ReducedMetric):
     squared metric. Composed with :class:`Exp` this is the Mahalanobis kernel.
     """
 
+    def __init__(self, A):
+        super().__init__(A)
+        self._cache_Dsq = None  # identity of the D whose squared projection is cached
+        self._cache_Psq = None  # the cached P**2 (value / dtheta / batch all read it)
+
     @property
     def A(self):
         """The projection matrix ``(d, h)`` (its columns are the metric's principal directions)."""
@@ -875,19 +894,29 @@ class ProjectedSquare(ReducedMetric):
     def _transform(self, D):
         return np.asarray(D, dtype=float) @ self.matrix  # projected differences P = D @ A
 
+    def _projected_sq(self, D):
+        # cache the squared projection P**2 the same way _reduce caches P: value, dtheta and batch
+        # all need it, so squaring once per fit (not per call) mirrors SquareThenMix's cached M.
+        if D is self._cache_Dsq:
+            return self._cache_Psq
+        Psq = np.square(self._reduce(D))
+        self._cache_Dsq, self._cache_Psq = D, Psq
+        return Psq
+
     def value(self, D, theta):
-        return np.square(self._reduce(D)) @ _asvec(theta)
+        return self._projected_sq(D) @ _asvec(theta)
 
     def spatial_grad(self, D, theta):
         # ds/dD_l = 2 sum_k theta_k P_k A_lk = 2 ((theta * P) @ A^T)_l. With A = I this is 2 theta D.
+        # needs the unsquared projection P, so it reads _reduce (not the squared cache).
         P = self._reduce(D)
         return 2.0 * ((_asvec(theta) * P) @ self.matrix.T)
 
     def dtheta(self, D, theta):
-        return np.square(self._reduce(D))
+        return self._projected_sq(D)
 
     def batch(self, D, thetas):
-        return _asmat(thetas) @ np.square(self._reduce(D)).T
+        return _asmat(thetas) @ self._projected_sq(D).T
 
 
 class SquareThenMix(ReducedMetric):

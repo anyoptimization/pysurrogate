@@ -53,6 +53,8 @@ class Parameter:
             count -- a search may resize it (see ``fill``).
         bounds: Default ``(lo, hi)`` in value space, each broadcastable to ``size``. A search may
             override these (the length-scale bounds are a search setting, not intrinsic to a kernel).
+            The default lower bound is a small positive ``1e-12`` (not ``0``) so the default
+            :class:`Log10` encoding never hits ``log10(0) = -inf``; it matches the Dace theta floor.
         encoding: The value<->coordinate map (defaults to :class:`Log10`, the positive-scale case).
         fill: Whether this parameter's size is *caller-driven* -- the length-scale block, whose ARD
             count comes from the bounds / start vector the caller supplies, not from the kernel's own
@@ -61,7 +63,7 @@ class Parameter:
             parameters (e.g. an exponent). Fixed shape parameters keep ``fill=False``.
     """
 
-    def __init__(self, name, size=1, bounds=(0.0, 100.0), encoding=None, fill=False):
+    def __init__(self, name, size=1, bounds=(1e-12, 100.0), encoding=None, fill=False):
         self.name = name
         self.size = size
         self.bounds = bounds

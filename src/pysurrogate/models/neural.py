@@ -89,8 +89,12 @@ class DeepKernelGP(Model):
         **kwargs,
     ) -> None:
         # standardize inputs (the MLP needs scaled features) and outputs; the lifecycle un-scales the
-        # returned mean, variance, and gradient through these affine transforms.
-        super().__init__(norm_X=Standardization(), norm_y=Standardization(), eliminate_duplicates=True, **kwargs)
+        # returned mean, variance, and gradient through these affine transforms. setdefault so a user
+        # override of any of these does not collide with the defaults (no duplicate-kwarg TypeError).
+        kwargs.setdefault("norm_X", Standardization())
+        kwargs.setdefault("norm_y", Standardization())
+        kwargs.setdefault("eliminate_duplicates", True)
+        super().__init__(**kwargs)
         if activation not in _ACT:
             raise ValueError(f"Unknown activation {activation!r}; choose one of {sorted(_ACT)}.")
         self.hidden_layer_sizes = hidden_layer_sizes
@@ -151,7 +155,7 @@ class DeepKernelGP(Model):
         if y.shape[1] != 1:
             raise ValueError(f"DeepKernelGP supports a single output, got {y.shape[1]}; fit one model per output.")
         nn.fit(X, y[:, 0])
-        self.nn_ = nn  # keep the fitted MLP for introspection (validation curve, iterations, ...)
+        self.nn = nn  # keep the fitted MLP for introspection (validation curve, iterations, ...)
         self._coefs, self._intercepts = nn.coefs_, nn.intercepts_
 
         # fit the GP head on the learned features: an isotropic Gaussian in feature space (the NN
@@ -159,7 +163,8 @@ class DeepKernelGP(Model):
         # length-scale + nugget are chosen by the `selection` strategy -- the same object Dace/Kriging
         # take. Default: learn the nugget by MLE over (noise, 1e-1); the `noise` floor keeps it PD.
         selection = self.selection if self.selection is not None else MaximumLikelihood(noise_bounds=(self.noise, 1e-1))
-        self.gp = Dace(
+        # the fitted GP engine lives in self.model, the one place every Model keeps its backend
+        self.model = Dace(
             regr=self.regr,
             corr=Gaussian(),
             theta=self.theta,
@@ -167,7 +172,7 @@ class DeepKernelGP(Model):
             noise=self.noise,
             selection=selection,
         )
-        self.gp.fit(self._features(X), y, optimize=optimize)
+        self.model.fit(self._features(X), y, optimize=optimize)
 
     def _refit(self, X, y, optimize=True):
         # freeze the learned feature map (and the fitted input/output standardization): only the cheap
@@ -179,16 +184,16 @@ class DeepKernelGP(Model):
         # selection, duplicate/nan filtering, and the fitted (frozen) standardization -- so the frozen
         # feature map sees inputs in exactly the space it was trained on.
         Xp, yp = self.preprocess(Xr, yr)
-        self.gp.refit(self._features(Xp), yp, optimize=optimize)
+        self.model.refit(self._features(Xp), yp, optimize=optimize)
         self._X = np.vstack([self._X, Xr])
         self._y = np.vstack([self._y, yr])
 
     def _predict(self, X, var=False, grad=False):
         if not grad:
-            p = self.gp.predict(self._features(X), var=var)
+            p = self.model.predict(self._features(X), var=var)
             return Prediction(y=p.y, var=p.var)
         Z, J = self._features(X, jac=True)
-        p = self.gp.predict(Z, var=var, grad=True)
+        p = self.model.predict(Z, var=var, grad=True)
         # chain rule (single output): d y / d x = (d y / d Z) . (d Z / d x), with p.grad shape (m, F).
         g = np.einsum("mf,mfk->mk", p.grad, J)
         return Prediction(y=p.y, var=p.var, grad=g)

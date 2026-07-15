@@ -11,11 +11,12 @@ from pysurrogate.util.misc import discretize
 class RandomForest(Model):
     """Random forest fit on a per-dimension grid, keeping the best target per occupied cell."""
 
-    def __init__(self, n_partitions=15, n_estimators=100, xl=None, xu=None, **kwargs) -> None:
+    def __init__(self, n_partitions=15, n_estimators=100, xl=None, xu=None, random_state=42, **kwargs) -> None:
         super().__init__(**kwargs)
         self.xl, self.xu = xl, xu
         self.n_partitions = n_partitions
         self.n_estimators = n_estimators
+        self.random_state = random_state  # fixed default keeps fits deterministic; overridable
 
     def _fit(self, X, y, **kwargs):
         # resolve the grid bounds per fit into fit-local attributes; do NOT overwrite the
@@ -25,25 +26,19 @@ class RandomForest(Model):
         self._xl = self.xl if self.xl is not None else X.min(axis=0)
         self._xu = self.xu if self.xu is not None else X.max(axis=0)
 
+        if y.shape[1] != 1:
+            raise ValueError(f"RandomForest supports a single output, got {y.shape[1]}; fit one model per output.")
         y = y[:, 0]
         X = discretize(X, self.n_partitions, self._xl, self._xu)
 
-        # collapse duplicate grid cells, keeping the best (minimum) target per cell
-        cells: dict[str, dict] = {}
-        for i, x in enumerate(X):
-            s = str(x)
-            if s not in cells:
-                cells[s] = dict(X=x, y=y[i], n=1)
-            else:
-                cells[s] = dict(X=x, y=min(cells[s]["y"], y[i]), n=cells[s]["n"] + 1)
+        # collapse duplicate grid cells, keeping the best (minimum) target per cell. Exact row
+        # equality via np.unique -- the old str(x) key truncated wide rows through numpy's print
+        # summarization and could merge distinct cells.
+        Xg, inv = np.unique(X, axis=0, return_inverse=True)
+        yg = np.full(len(Xg), np.inf)
+        np.minimum.at(yg, inv, y)
 
-        Xg = np.zeros((len(cells), X.shape[1]))
-        yg = np.zeros(len(cells))
-        for i, e in enumerate(cells.values()):
-            Xg[i] = e["X"]
-            yg[i] = e["y"]
-
-        rf = RandomForestRegressor(n_estimators=self.n_estimators, random_state=42)
+        rf = RandomForestRegressor(n_estimators=self.n_estimators, random_state=self.random_state)
         rf.fit(Xg, yg)
         self.model = rf
 

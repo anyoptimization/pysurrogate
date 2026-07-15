@@ -4,8 +4,9 @@ import numpy as np
 from sklearn.cross_decomposition import PLSRegression  # type: ignore[import-untyped]
 
 from pysurrogate.core.kernel import KPLSKernel
-from pysurrogate.core.model import Model
+from pysurrogate.core.transformation import standardize
 from pysurrogate.dace import ConstantRegression, Dace, Gaussian
+from pysurrogate.models._dace_backed import DaceBackedModel
 from pysurrogate.optimizer import Adam
 
 # sentinel: "optimizer not specified" -> use the KPLS default below. Distinct from optimizer=None,
@@ -24,7 +25,7 @@ def _default_optimizer():
     return Adam(pop_size=8, steps=40)
 
 
-class KPLS(Model):
+class KPLS(DaceBackedModel):
     """Kriging with Partial Least Squares -- Kriging that scales to high input dimensions.
 
     Ordinary ARD Kriging tunes one length-scale per input dimension, so the ``theta`` search
@@ -47,6 +48,12 @@ class KPLS(Model):
     ``Exponential``.
     """
 
+    # Constant trend by default: it is the canonical KPLS choice (matches the SMT reference)
+    # and more accurate in high dimensions, where a linear trend's d+1 extra GLS parameters
+    # tend to overfit. Pass regr=LinearRegression() to override.
+    default_regr = ConstantRegression
+    default_corr = Gaussian
+
     def __init__(
         self,
         regr=None,
@@ -58,12 +65,7 @@ class KPLS(Model):
         selection=None,
         **kwargs,
     ) -> None:
-        super().__init__(eliminate_duplicates=True, **kwargs)
-        # Constant trend by default: it is the canonical KPLS choice (matches the SMT reference)
-        # and more accurate in high dimensions, where a linear trend's d+1 extra GLS parameters
-        # tend to overfit. Pass regr=LinearRegression() to override.
-        self.regr = regr if regr is not None else ConstantRegression()
-        self.corr = corr if corr is not None else Gaussian()
+        super().__init__(regr=regr, corr=corr, selection=selection, **kwargs)
         self.n_pls = n_pls
         self.theta = theta
         self.theta_bounds = theta_bounds
@@ -77,10 +79,6 @@ class KPLS(Model):
         # layer deep-copies models per fold, and a bare object() sentinel does not survive deepcopy
         # by identity -- storing the real Adam keeps `is`-checks out of the hot path entirely.
         self.optimizer = _default_optimizer() if optimizer is _DEFAULT_OPTIMIZER else optimizer
-        # optional hyperparameter-selection strategy (MLE / MAP / held-out), forwarded to Dace. When
-        # given it supplies the optimizer (overriding the Adam default above), the MAP prior, and the
-        # nugget policy; None keeps the KPLS defaults.
-        self.selection = selection
 
     def _pls_weights(self, X, y, h):
         """Squared PLS weights ``(d, h)`` in the engine's standardized space.
@@ -90,11 +88,8 @@ class KPLS(Model):
         subspace matches. Returns ``x_rotations_ ** 2`` -- the per-dimension, per-component
         squared weights the KPLS kernel mixes.
         """
-        mX, sX = np.mean(X, axis=0), np.std(X, axis=0, ddof=1)
-        mY, sY = np.mean(y, axis=0), np.std(y, axis=0, ddof=1)
-        sX = np.where(sX == 0.0, 1.0, sX)
-        sY = np.where(sY == 0.0, 1.0, sY)
-        nX, nY = (X - mX) / sX, (y - mY) / sY
+        nX, _, _ = standardize(X)
+        nY, _, _ = standardize(y)
         pls = PLSRegression(n_components=h, scale=False).fit(nX, nY)
         return np.square(pls.x_rotations_)  # (d, h)
 
@@ -106,9 +101,7 @@ class KPLS(Model):
         w2 = self._pls_weights(X, y, h)
         kernel = KPLSKernel(self.corr, w2)
 
-        lo, hi = self.theta_bounds
-        theta = np.full(h, self.theta)
-        theta_bounds = (np.full(h, lo), np.full(h, hi))
+        theta, theta_bounds = self._broadcast_theta(self.theta, self.theta_bounds, h)
         # self.optimizer is already a concrete optimizer (or None to freeze), resolved in __init__.
         return Dace(
             regr=self.regr,
@@ -122,11 +115,3 @@ class KPLS(Model):
     def _fit(self, X, y, optimize=True, **kwargs):
         self.model = self._kpls_engine(X, y)
         self.model.fit(X, y, optimize=optimize)
-
-    def _refit(self, X, y, optimize=True):
-        # incremental warm-started re-fit via the Dace engine at the fixed PLS subspace; the generic
-        # Model.refit handles out-of-sample scoring and record. optimize warm-starts / freezes theta.
-        self.model.refit(X, y, optimize=optimize)
-
-    def _predict(self, X, var=False, grad=False):
-        return self.model.predict(X, var=var, grad=grad)

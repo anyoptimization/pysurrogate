@@ -35,3 +35,23 @@ def test_random_forest_respects_explicit_bounds():
     m = RandomForest(n_partitions=6, n_estimators=15, xl=xl, xu=xu).fit(X, X[:, 0])
     assert np.allclose(m._xl, xl) and np.allclose(m._xu, xu)
     assert np.all(np.isfinite(m.predict(X[:5]).y))
+
+
+def test_random_forest_keeps_the_best_target_per_grid_cell():
+    # two designs landing in the same coarse cell collapse to ONE (via np.unique row keying), keeping
+    # the minimum target (np.minimum.at). With a single occupied cell the forest predicts that min.
+    # explicit wide bounds so both points fall in the same coarse bin (grid cell 0 in each dim)
+    X = np.array([[0.10, 0.10], [0.15, 0.12]])
+    y = np.array([7.0, 2.0])
+    m = RandomForest(n_partitions=2, xl=np.zeros(2), xu=np.full(2, 10.0), n_estimators=10).fit(X, y)
+    assert np.allclose(m.predict(np.array([[1.0, 1.0]])).y, 2.0)  # the minimum of the two targets
+
+
+def test_random_forest_random_state_is_exposed_and_deterministic():
+    # random_state is a real constructor knob (was hard-coded); the same seed gives an identical fit.
+    rng = np.random.RandomState(0)
+    X = rng.uniform(0.0, 1.0, (40, 3))
+    y = X[:, 0] + 0.5 * X[:, 1]
+    a = RandomForest(random_state=7, n_estimators=15).fit(X, y).predict(X[:5]).y
+    b = RandomForest(random_state=7, n_estimators=15).fit(X, y).predict(X[:5]).y
+    assert np.allclose(a, b)

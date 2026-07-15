@@ -95,3 +95,18 @@ def test_analytic_gradient_matches_finite_difference(make):
         fd[0, k] = (model.predict(qp).y[0, 0] - model.predict(qm).y[0, 0]) / (2 * eps)
 
     assert np.allclose(g, fd, atol=1e-3)
+
+
+@pytest.mark.parametrize(
+    "make",
+    [lambda: SVR(), lambda: InverseDistanceWeighting(), lambda: PolynomialRegression(degree=2), lambda: RandomForest()],
+    ids=["SVR", "IDW", "PolynomialRegression", "RandomForest"],
+)
+def test_single_output_backends_reject_multi_output(make):
+    # these backends fit one output; a multi-output y previously got silently truncated to y[:, 0].
+    # A clear ValueError beats a silent wrong answer -- fit one model per output instead.
+    rng = np.random.RandomState(0)
+    X = rng.random((30, 2))
+    Y = np.column_stack([np.sin(X.sum(1)), (X**2).sum(1)])  # two outputs
+    with pytest.raises(ValueError, match="single output"):
+        make().fit(X, Y)

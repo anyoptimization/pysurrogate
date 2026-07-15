@@ -121,6 +121,20 @@ def test_kpls_refit_requires_prior_fit():
         model.refit(*_highdim(d=10))
 
 
+def test_kpls_respects_active_dims_on_fit_refit_and_predict():
+    # regression (DaceBackedModel._refit): with active_dims KPLS runs PLS and fits on the selected
+    # columns only; refit previously bypassed preprocess and passed full-width raw inputs, crashing.
+    rng = np.random.RandomState(3)
+    X = rng.uniform(-1, 1, size=(50, 6))
+    y = (np.sin(X[:, [0]]) + 0.5 * X[:, [2]] + 0.1 * X[:, [4]] ** 2).reshape(-1, 1)
+    model = KPLS(n_pls=2, active_dims=[0, 2, 4]).fit(X, y, optimize=False)
+    assert model.X.shape[1] == 3  # PLS/engine saw only the 3 active dims
+    Xnew = rng.uniform(-1, 1, size=(10, 6))
+    ynew = (np.sin(Xnew[:, [0]]) + 0.5 * Xnew[:, [2]] + 0.1 * Xnew[:, [4]] ** 2).reshape(-1, 1)
+    model.refit(Xnew, ynew, optimize=False)  # must not raise despite full-width raw inputs
+    assert np.all(np.isfinite(model.predict(X[:5]).y))
+
+
 def test_kpls_survives_deepcopy_and_fits():
     """A deep-copied KPLS must still fit -- the selection layer clones models per CV fold.
 

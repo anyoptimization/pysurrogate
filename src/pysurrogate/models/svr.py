@@ -18,6 +18,8 @@ class SVR(Model):
         self.C = C
 
     def _fit(self, X, y, **kwargs):
+        if y.shape[1] != 1:
+            raise ValueError(f"SVR supports a single output, got {y.shape[1]}; fit one model per output.")
         svr = _SVR(kernel=self.kernel, epsilon=self.eps, C=self.C, gamma="scale", degree=3, tol=0.001, shrinking=True)
         regr = make_pipeline(StandardScaler(), svr)
         regr.fit(X, y[:, 0])
