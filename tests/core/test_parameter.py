@@ -23,6 +23,14 @@ def test_log10_encoding_decodes_and_transforms_bounds():
     assert (lo, hi) == (-3.0, 3.0)
 
 
+def test_default_lower_bound_is_finite_under_log10():
+    # regression: the default lower bound is 1e-12, not 0, so the default Log10 encoding never
+    # produces log10(0) = -inf in the search box. A 0.0 default would silently poison the bounds.
+    space = ParameterSpace([Parameter("theta", size=2)])  # all-default bounds + Log10
+    lo, hi = space.bounds()
+    assert np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))
+
+
 def test_parameter_space_bounds_and_decode():
     space = ParameterSpace(
         [

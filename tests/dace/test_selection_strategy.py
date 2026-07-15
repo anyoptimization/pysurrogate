@@ -120,3 +120,23 @@ def test_one_selection_object_serves_both_dace_and_a_model_backend():
     backend = Kriging(corr=Gaussian(), theta_bounds=(0.01, 100.0), selection=sel).fit(X, y)
     assert np.all(np.isfinite(engine.predict(X[:3]).y))
     assert np.all(np.isfinite(backend.predict(X[:3]).y))
+
+
+def test_refit_forwards_heldout_patience():
+    # regression: refit(validate=True) held out the new points but dropped the Selection's patience,
+    # so a patient HeldOut early-stopped on fit() but never on refit. Patience must reach both paths.
+    X, y = _data(60, d=2, seed=7)
+
+    def refit_evals(patience):
+        m = Dace(
+            regr=ConstantRegression(),
+            corr=Gaussian(),
+            theta=1.0,
+            theta_bounds=(0.01, 100.0),
+            selection=HeldOut(patience=patience),
+        )
+        m.fit(X[:40], y[:40])
+        m.refit(X[40:], y[40:], validate=True)
+        return m.optimization["n_evals"]
+
+    assert refit_evals(2) <= refit_evals(None)

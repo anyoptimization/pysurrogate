@@ -76,3 +76,14 @@ def test_rbf_gaussian_is_no_longer_the_quartic_bug():
     r2 = float((q**2).sum())
     assert np.isclose(val, np.exp(-sigma * r2))
     assert not np.isclose(val, np.exp(-sigma * r2**2))  # not the old quartic
+
+
+def test_svd_inv_truncates_singular_values_instead_of_amplifying_them():
+    # regression: a singular system used to hit 1/S -> inf. Truncating tiny singular values yields a
+    # finite least-norm pseudo-inverse (A @ A_inv @ A == A) rather than an inf-poisoned matrix.
+    from pysurrogate.models.rbf import svd_inv
+
+    A = np.array([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [1.0, 0.0, 1.0]])  # row 1 = 2*row 0 -> rank 2
+    A_inv, _ = svd_inv(A)
+    assert np.all(np.isfinite(A_inv))
+    np.testing.assert_allclose(A @ A_inv @ A, A, atol=1e-9)
