@@ -4,7 +4,10 @@ import numpy as np
 
 from pysurrogate.core.prediction import Prediction, predictions_frame
 from pysurrogate.core.transformation import NoNormalization
+from pysurrogate.util.logging import get_logger
 from pysurrogate.util.misc import at_least2d, is_duplicate
+
+log = get_logger("model")
 
 
 class Model:
@@ -155,13 +158,31 @@ class Model:
         self.norm_y.reset()
         self.X, self.y = self.preprocess(X, y)
 
+        name = type(self).__name__
+        log.info(
+            "%s.fit: %d points, %d input dims, %d output(s), optimize=%s",
+            name,
+            *self.X.shape,
+            self.y.shape[1],
+            optimize,
+        )
+        if self.X.shape[0] < X.shape[0]:
+            log.debug(
+                "%s.fit: %d of %d rows dropped by preprocessing (duplicates/nan)",
+                name,
+                X.shape[0] - self.X.shape[0],
+                X.shape[0],
+            )
+
         try:
             self._fit(self.X, self.y, optimize=optimize, **kwargs)
             self.success = True
             self.has_been_fitted = True  # only a successful fit counts as fitted
+            log.debug("%s.fit: succeeded", name)
         except Exception as ex:
             self.success = False
             self.exception = ex
+            log.warning("%s.fit: failed with %r", name, ex)
             if self.raise_exception_while_fitting:
                 raise ex
 
@@ -199,6 +220,13 @@ class Model:
         out_of_sample = self.predict(X, var=True)  # the OLD model scores the unseen points
         self._record(X, y, out_of_sample)  # keep the full prediction for history()
         score = self._score(at_least2d(y, expand="c"), out_of_sample, metrics)
+        log.info(
+            "%s.refit: epoch %d, %d new point(s), out-of-sample score %s",
+            type(self).__name__,
+            self._epoch - 1,
+            len(at_least2d(X, expand="r")),
+            score,
+        )
         self._refit(X, y, optimize=optimize)
         return score
 
@@ -278,6 +306,13 @@ class Model:
             raise ValueError("model has no predictive variance to calibrate.")
         resid2 = np.square(at_least2d(y, expand="c") - pred.y)
         s = float(np.mean(resid2 / np.maximum(pred.var, 1e-300)))
+        log.info(
+            "%s.calibrate: variance scale %.4g on %d held-out point(s) (apply=%s)",
+            type(self).__name__,
+            s,
+            len(at_least2d(y, expand="c")),
+            apply,
+        )
         if apply:
             # accumulate: pred.var already carries the current scale, so multiplying keeps calibrate()
             # idempotent (a second call on a calibrated model returns ~1 and leaves the scale put).
@@ -358,10 +393,12 @@ class Model:
         Xq = X[:, self.active_dims] if self.active_dims is not None else X
         Xq = self.norm_X.forward(Xq)
 
+        log.debug("%s.predict: %d point(s), var=%s grad=%s", type(self).__name__, m, var, grad)
         try:
             pred = self._predict(Xq, var=var, grad=grad)
             pred = self.postprocess(pred)
         except Exception as e:
+            log.warning("%s.predict: failed with %r", type(self).__name__, e)
             if self.raise_exception_while_prediction:
                 raise e
             # the same NaN sentinel as the failed-fit path above -- one failure convention
