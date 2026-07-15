@@ -342,6 +342,19 @@ def test_family_failure_warns_and_strict_raises(monkeypatch):
         Landscape(X, y, strict=True)
 
 
+def test_strict_rejects_non_finite_inputs():
+    # strict=True promises to flag pathological inputs, but no family raises on nan/inf -- they emit
+    # nan features. So finiteness must be validated up front; the default (strict=False) tolerates it.
+    rng = np.random.default_rng(3)
+    X = rng.uniform(-1, 1, (40, 2))
+    y = np.sum(X**2, axis=1)
+    X_bad = X.copy()
+    X_bad[0, 0] = np.inf
+    with pytest.raises(ValueError, match="finite"):
+        Landscape(X_bad, y, strict=True)
+    Landscape(X_bad, y)  # default is tolerant -- must not raise
+
+
 def test_curvature_flat_frac_detects_ridge(L):
     """flat_frac exposes rank-deficient (ridge) Hessians the condition number deliberately skips."""
     assert L["ridge"].get("curvature.flat_frac") > 0.5

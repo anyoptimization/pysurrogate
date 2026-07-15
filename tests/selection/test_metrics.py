@@ -36,6 +36,20 @@ def test_probabilistic_metric_requires_sigma():
         metrics.calc_metric("nlpd", y, y_hat)
 
 
+def test_cal_err_is_nan_for_a_model_without_uncertainty():
+    # a sigma-less model passes an all-NaN sigma. Every probabilistic metric must yield NaN then,
+    # so it is excluded from calibration rankings -- not a spurious finite 0.9 (coverage's <=
+    # comparison used to read NaN as False and return 0.0). cal_err must match nlpd/crps/calib.
+    y, y_hat, nan = np.array([0.0, 1.0, 2.0]), np.array([0.1, 1.1, 1.9]), np.full(3, np.nan)
+    for name in ("cal_err", "nlpd", "crps", "calib"):
+        assert np.isnan(metrics.calc_metric(name, y, y_hat, sigma=nan)), name
+
+
+def test_cal_err_is_finite_when_sigma_is_present():
+    y, y_hat, sigma = np.zeros(50), np.zeros(50), np.full(50, 1.0)
+    assert np.isfinite(metrics.calc_metric("cal_err", y, y_hat, sigma=sigma))
+
+
 def test_ranking_is_monotone_invariant():
     y = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
     assert np.isclose(metrics.calc_metric("spear", y, y), 1.0)

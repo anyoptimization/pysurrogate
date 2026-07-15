@@ -151,6 +151,11 @@ class Model:
 
         # a fresh fit invalidates any prior variance calibration -- reset to the identity.
         self._calibration = 1.0
+        # a fresh fit starts a new lifecycle: drop the prequential validation log and epoch counter
+        # from any prior fit of this instance, so history() never mixes two models' out-of-sample
+        # records and refit epochs restart at 0 (matching the calibration/normalization reset below).
+        self._validation = None
+        self._epoch = 0
         # drop any statistics a data-fitted normalization estimated on a previous fit, so this fit
         # (e.g. the refit lifecycle on grown data) re-estimates from the current data instead of
         # reusing stale train statistics. No-op for the identity/user-fixed transforms.
@@ -199,6 +204,8 @@ class Model:
 
         The absorb step delegates to :meth:`_refit`; ``optimize`` is forwarded. Backends with a warm
         start (e.g. Kriging) override :meth:`_refit` for an incremental update; the base re-fits fresh.
+        Absorbing new points resets any prior variance calibration to the identity (the old scale is
+        stale once the model has moved), consistently across every backend.
 
         Args:
             X: The new input points to add -- **only the additions, not the full set**.
@@ -240,7 +247,13 @@ class Model:
         """
         X = np.vstack([self._X, at_least2d(X, expand="r")])
         y = np.vstack([self._y, at_least2d(y, expand="c")])
+        # refit is a continuation, not a fresh lifecycle: the generic refit() has already appended
+        # this batch's out-of-sample record and advanced the epoch. The base rebuilds via fit(),
+        # which resets the prequential log for a *fresh* fit -- so snapshot it and restore it here,
+        # keeping history() intact across an incremental refit (a warm-start _refit never calls fit).
+        validation, epoch = self._validation, self._epoch
         self.fit(X, y, optimize=optimize)
+        self._validation, self._epoch = validation, epoch
 
     def validate(self, X, y, metrics=None):
         """Score points against the current model across the metric registry -- a multi-metric score.
@@ -362,7 +375,9 @@ class Model:
                 is its std-dev view).
             grad: Also return the gradient of the mean w.r.t. ``X`` (``Prediction.grad``).
                 When ``var`` and ``grad`` are both set, a backend that supports it (Kriging)
-                additionally returns ``Prediction.var_grad``.
+                additionally returns ``Prediction.var_grad``. With ``active_dims`` set the gradient
+                is taken w.r.t. the active dimensions only, so its width is ``len(active_dims)``
+                (the model is constant in the dropped dimensions).
 
         Returns:
             A :class:`~pysurrogate.core.prediction.Prediction` whose ``y`` is always set;

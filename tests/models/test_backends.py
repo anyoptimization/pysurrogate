@@ -99,8 +99,14 @@ def test_analytic_gradient_matches_finite_difference(make):
 
 @pytest.mark.parametrize(
     "make",
-    [lambda: SVR(), lambda: InverseDistanceWeighting(), lambda: PolynomialRegression(degree=2), lambda: RandomForest()],
-    ids=["SVR", "IDW", "PolynomialRegression", "RandomForest"],
+    [
+        lambda: SVR(),
+        lambda: InverseDistanceWeighting(),
+        lambda: PolynomialRegression(degree=2),
+        lambda: RandomForest(),
+        lambda: RBF(),
+    ],
+    ids=["SVR", "IDW", "PolynomialRegression", "RandomForest", "RBF"],
 )
 def test_single_output_backends_reject_multi_output(make):
     # these backends fit one output; a multi-output y previously got silently truncated to y[:, 0].

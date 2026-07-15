@@ -79,6 +79,10 @@ class DaceBackedModel(Model):
         self.model.refit(Xp, yp, optimize=optimize)
         self._X = np.vstack([self._X, Xr])
         self._y = np.vstack([self._y, yr])
+        # the warm-started engine refit bypasses Model.fit, so reset the variance calibration here to
+        # match the base _refit (which re-fits through fit and resets it): after absorbing new points
+        # the old calibration scale is stale, and both backend families must behave identically.
+        self._calibration = 1.0
 
     def _predict(self, X, var=False, grad=False):
         # Dace.predict speaks the Model vocabulary (var=, grad=), so this is a direct pass-through

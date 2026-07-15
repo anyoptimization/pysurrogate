@@ -89,3 +89,27 @@ def test_predict_promotes_1d_point_before_slicing_active_dims():
     model = LinearBackend(active_dims=[0]).fit(X, y)
     pred = model.predict(np.array([0.3, 0.7]))  # a single 1-D point of width 2
     assert pred.y.shape == (1, 1) and np.all(np.isfinite(pred.y))
+
+
+def test_refit_accumulates_prequential_history_with_epochs():
+    X, y = _data()
+    model = LinearBackend().fit(X, y)
+    model.refit(X[:3], y[:3])
+    model.refit(X[3:6], y[3:6])
+    hist = model.history()
+    assert sorted(hist["epoch"].unique().tolist()) == [0, 1]
+
+
+def test_fresh_fit_resets_the_prequential_log_and_epoch():
+    # regression: fit() starts a NEW lifecycle, so a prior fit's out-of-sample records and epoch
+    # counter must not leak into history() -- otherwise score-by-epoch mixes two models.
+    X, y = _data()
+    model = LinearBackend().fit(X, y)
+    model.refit(X[:3], y[:3])
+    model.refit(X[3:6], y[3:6])
+    assert len(model.history()) == 6
+
+    model.fit(X, y)  # fresh fit -- must wipe the stale log and restart epochs at 0
+    assert model.history().empty
+    model.refit(X[:3], y[:3])
+    assert model.history()["epoch"].unique().tolist() == [0]
