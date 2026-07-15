@@ -14,6 +14,24 @@ def _branin_like():
     return X, y
 
 
+def test_eliminate_duplicates_can_be_overridden_without_typeerror():
+    # regression: the backend passed eliminate_duplicates=True alongside **kwargs, so a user
+    # override collided ("multiple values for keyword argument"). setdefault makes it overridable.
+    assert Kriging(eliminate_duplicates=False).eliminate_duplicates is False
+    assert Kriging().eliminate_duplicates is True  # default stays on
+
+
+def test_refit_resets_variance_calibration():
+    # regression: the warm-started Dace-backed refit bypasses fit(), so it used to keep a stale
+    # calibration scale. refit must reset it to the identity, like the base (fit-rebuilding) refit.
+    X, y = _branin_like()
+    model = Kriging().fit(X[:20], y[:20])
+    model.calibrate(X[20:], y[20:])
+    assert model._calibration != 1.0  # calibration took effect
+    model.refit(X[20:25], y[20:25])
+    assert model._calibration == 1.0  # absorbing points reset the stale scale
+
+
 def test_ard_broadcasts_theta_even_with_no_bounds():
     # Kriging(ARD=True, theta_bounds=None) must fit one length-scale per input dimension -- an
     # unbounded ARD search -- and NOT silently collapse to a single isotropic length-scale. Frozen

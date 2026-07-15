@@ -97,3 +97,15 @@ def test_study_train_noise_is_reproducible_and_keeps_ranking():
     again = study(f, xl, xu, n=30, models=models, n_test=80, repeats=2, seed=5, noise=0.5)
     assert noisy.failures == again.failures
     assert np.isclose(noisy.mean("rmse")["rbf"], again.mean("rmse")["rbf"])
+
+
+def test_metrics_are_returned_in_registry_order_regardless_of_insertion():
+    # regression: metrics() built its order from a set, so column order varied across processes
+    # (PYTHONHASHSEED). It must follow the registry order deterministically. Feed a scrambled raw
+    # and assert the output matches metric_names() filtered to what was collected.
+    from pysurrogate.selection.metrics import metric_names
+
+    raw = {"m": {"calib": [1.0], "rmse": [0.1], "nlpd": [1.0], "mae": [0.2]}}
+    res = StudyResult(raw, failures={}, meta={})
+    collected = {"calib", "rmse", "nlpd", "mae"}
+    assert res.metrics() == [m for m in metric_names() if m in collected]
