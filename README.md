@@ -3,13 +3,22 @@
 A unified surrogate-modeling toolkit for Python — sampling, fitting, and model
 selection in one place.
 
-`pysurrogate` consolidates a DACE Kriging engine and a multi-backend model layer
-into a single, consistently-styled package:
+Every backend speaks the same `Model` contract — `fit` / `predict` / `refit` —
+so you can swap a Kriging model for a random forest without touching the
+surrounding code:
 
-- **`pysurrogate.dace`** — the DACE Kriging engine: the `Dace` model with
-  pluggable regression trends, correlation kernels, and theta optimizers.
-- *(more backends — RBF, SVR, KNN, IDW, ... — and the model-selection layer are
-  being folded in.)*
+- **Kriging / DACE** — a faithful DACE engine (`Dace`, `Kriging`, `KPLS`) with a
+  correlation-kernel zoo, regression trends, ARD, learned noise, calibrated
+  variance, and analytic gradients.
+- **Model zoo** — `RBF`, `SVR`, `KNN`, `InverseDistanceWeighting`,
+  `RandomForest`, `PolynomialRegression`, `DeepKernelGP`, `RotatedKriging`, and
+  a `SimpleMean` baseline.
+- **Generic optimizers** — a small `Problem`/`Optimizer` layer (LBFGS,
+  PatternSearch, Boxmin, Adam, Restart) reusable far beyond theta tuning.
+- **Model selection** — `Benchmark`, `AutoModel`, `study`, and a
+  direction-aware metrics registry.
+- **Landscape analysis** — model-free structural fingerprints of a labelled
+  point cloud (`pysurrogate.landscape`).
 
 ## Install
 
@@ -21,18 +30,32 @@ pip install pysurrogate
 
 ```python
 import numpy as np
-from pysurrogate import Dace
-from pysurrogate.dace import Gaussian, ConstantRegression
+from pysurrogate import Kriging
 
 X = np.random.random((20, 2))
-y = (X ** 2).sum(axis=1, keepdims=True)
+y = (X**2).sum(axis=1)
 
-model = Dace(regr=ConstantRegression(), corr=Gaussian(), theta=1.0, thetaL=1e-3, thetaU=20.0)
-model.fit(X, y)
+model = Kriging().fit(X, y)
 
-pred = model.predict(np.random.random((5, 2)), mse=True)
-print(pred.y, pred.mse)
+pred = model.predict(np.random.random((5, 2)), var=True)
+print(pred.y, pred.sigma)
 ```
+
+The lower-level `Dace` engine is available directly:
+
+```python
+from pysurrogate import Dace, Gaussian, ConstantRegression
+
+model = Dace(regr=ConstantRegression(), corr=Gaussian(), theta=1.0, theta_bounds=(1e-3, 20.0))
+model.fit(X, y.reshape(-1, 1))
+pred = model.predict(np.random.random((5, 2)), var=True)
+```
+
+## Documentation
+
+The full documentation (getting started, the model zoo, Kriging internals,
+optimizers, sampling, selection, and the API reference) lives under `docs/` and
+builds with `pyclawd docs build`.
 
 ## Development
 

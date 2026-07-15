@@ -68,11 +68,12 @@ hallmark of an interpolating Gaussian-process surrogate.
 | Area | Highlights |
 |---|---|
 | **Kriging / DACE** | A faithful DACE engine: correlation-kernel zoo, regression trends, ARD, learned noise, calibrated variance, analytic gradients. |
-| **Model zoo** | `Kriging`, `RBF`, `SVR`, `KNN`, `InverseDistanceWeighting`, `SimpleMean`, `PolynomialRegression`, `RandomForest` — one `Model` contract. |
+| **Model zoo** | `Kriging`, `KPLS`, `RotatedKriging`, `DeepKernelGP`, `RBF`, `SVR`, `KNN`, `InverseDistanceWeighting`, `SimpleMean`, `PolynomialRegression`, `RandomForest` — one `Model` contract. |
 | **Uncertainty** | Predictive variance, `sigma`, and `calibrate()` to make intervals honest. |
 | **Generic optimizers** | A small `Problem`/`Optimizer` layer — LBFGS, PatternSearch, Boxmin, Adam, Restart — reusable far beyond theta tuning. |
 | **Sampling** | Latin-Hypercube and random designs with local RNGs (no global-state pollution). |
 | **Model selection** | `Benchmark`, `AutoModel`, `study`, and a direction-aware metrics registry. |
+| **Landscape analysis** | `Landscape` — model-free structural fingerprints (rotation, modality, separability, smoothness, ...) of a labelled point cloud. |
 
 ## Explore
 
@@ -88,6 +89,7 @@ hallmark of an interpolating Gaussian-process surrogate.
    optimizers
    sampling
    selection
+   landscape
    api
 ```
 

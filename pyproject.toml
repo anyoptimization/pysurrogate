@@ -35,6 +35,16 @@ packages = ["src/pysurrogate"]
 # `python docs/cli.py`. Kept out of the shipped package (PEP 735 group, not an
 # extra).
 [dependency-groups]
+# Test/dev toolchain probed by `pyclawd doctor` and used by `pyclawd test`.
+dev = [
+    "pytest",
+    "pytest-xdist",
+    "pytest-cov",
+    "ruff",
+    "mypy",
+    # Root conftest pins BLAS threads for a big test-suite speedup.
+    "threadpoolctl",
+]
 docs = [
     # Sphinx + rendering
     "sphinx>=7,<9",

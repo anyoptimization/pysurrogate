@@ -63,6 +63,14 @@ Model backends
 .. autoclass:: pysurrogate.RandomForest
    :members:
 
+.. autoclass:: pysurrogate.DeepKernelGP
+   :members:
+
+.. autoclass:: pysurrogate.RotatedKriging
+   :members:
+
+.. autofunction:: pysurrogate.active_subspace
+
 Optimizer layer
 ---------------
 
@@ -153,6 +161,12 @@ Metrics
 ~~~~~~~
 
 .. automodule:: pysurrogate.selection.metrics
+   :members:
+
+Landscape analysis
+------------------
+
+.. autoclass:: pysurrogate.Landscape
    :members:
 
 Test functions

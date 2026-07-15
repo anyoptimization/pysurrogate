@@ -1,4 +1,15 @@
-# landscape — exploratory landscape analysis for labelled point clouds
+---
+jupytext:
+  formats: ipynb,md:myst
+  text_representation:
+    extension: .md
+    format_name: myst
+kernelspec:
+  display_name: Python 3
+  name: python3
+---
+
+# Landscape analysis
 
 `src/pysurrogate/landscape/` turns a labelled point cloud `(X, y)` into a
 structural fingerprint of the function it implies. You hand it the samples you
@@ -501,7 +512,7 @@ here.)*
 - **edge_fitness_gap / edge_gap_cv** — mean / CV of edge fitness gaps.
 - **weighted_clustering / clustering_coef** — Onnela fitness-weighted vs unweighted
   clustering.
-- **basin_count** — sink fraction of the better-neighbor graph.
+- **basin_frac** — sink fraction of the better-neighbor graph.
 - **largest_basin_frac** — fraction descending into the single largest basin.
 - **basin_size_gini** — concentration of basin sizes.
 - **sink_fitness_spread** — std of fitness across sink nodes.
