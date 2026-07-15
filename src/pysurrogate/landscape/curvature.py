@@ -2,6 +2,8 @@
 
 import numpy as np
 
+from ._util import _safe_float
+
 
 def _eigvals(A):
     """Real, sorted-descending eigenvalues of a symmetric matrix (empty on failure).
@@ -42,6 +44,7 @@ def compute(ctx) -> dict:
         "eig_abs_max",
         "eig_abs_min",
         "condition_number",
+        "flat_frac",
         "convex_frac",
         "neg_curv_frac",
         "definiteness",
@@ -62,6 +65,7 @@ def compute(ctx) -> dict:
                     "eig_abs_mean": 0.0,
                     "eig_abs_max": 0.0,
                     "eig_abs_min": 0.0,
+                    "flat_frac": 1.0,
                     "convex_frac": np.nan,
                     "neg_curv_frac": np.nan,
                     "definiteness": 0.0,
@@ -92,11 +96,16 @@ def compute(ctx) -> dict:
         tol = max(1e-9, 1e-6 * emax)
         nontiny = aw[aw > tol]
 
-        # condition number over non-tiny curvatures: near 1 = isotropic bowl, huge = a stiff
-        # valley/ridge with one dominant direction.
+        # fraction of flat (near-zero-curvature) directions: ~0 for a full-rank bowl, high for a
+        # ridge/plateau whose Hessian is rank-deficient.
+        out["flat_frac"] = float(np.mean(aw <= tol))
+
+        # condition number over non-tiny curvatures only: near 1 = isotropic bowl, huge = a stiff
+        # valley/ridge with one dominant direction. Flat directions are deliberately excluded
+        # (their prevalence is reported separately as ``flat_frac``), so a rank-deficient ridge
+        # can still read as well-conditioned within its curved subspace.
         if nontiny.size >= 1:
-            cmin = float(np.min(nontiny))
-            out["condition_number"] = float(emax / cmin) if cmin > 0 else np.inf
+            out["condition_number"] = float(emax / np.min(nontiny))
         else:
             out["condition_number"] = np.nan
 
@@ -141,25 +150,16 @@ def compute(ctx) -> dict:
 
         # curvature-vs-linear balance: how much the second-order term explains beyond the plane.
         # read from the fit's R² gain, mapped to a bounded [0, 1] weight (1 = curvature-dominated).
-        try:
-            lin_r2 = float(np.clip(q.linear_r2, -1e6, 1.0))
-            quad_r2 = float(np.clip(q.r2, -1e6, 1.0))
-            gain = quad_r2 - lin_r2
-            denom = abs(quad_r2) + abs(lin_r2)
-            if denom > 1e-12:
-                out["curv_linear_ratio"] = float(np.clip(gain / denom, 0.0, 1.0))
-            else:
-                out["curv_linear_ratio"] = 0.0
-        except Exception:
-            out["curv_linear_ratio"] = np.nan
+        lin_r2 = float(np.clip(q.linear_r2, -1e6, 1.0))
+        quad_r2 = float(np.clip(q.r2, -1e6, 1.0))
+        gain = quad_r2 - lin_r2
+        denom = abs(quad_r2) + abs(lin_r2)
+        if denom > 1e-12:
+            out["curv_linear_ratio"] = float(np.clip(gain / denom, 0.0, 1.0))
+        else:
+            out["curv_linear_ratio"] = 0.0
     except Exception:
         return out
 
-    # final scrub: coerce to float; keep inf as a meaningful "unbounded" signal.
-    for k in keys:
-        v = out[k]
-        try:
-            out[k] = float(v)
-        except (TypeError, ValueError):
-            out[k] = np.nan
-    return out
+    # final scrub: plain floats only; non-finite (incl. inf) reads as nan per the feature contract.
+    return {k: _safe_float(v) for k, v in out.items()}

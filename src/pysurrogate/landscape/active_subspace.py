@@ -167,50 +167,29 @@ def compute(ctx) -> dict:
     # -- eigenvalue-spectrum (active-subspace) features ----------------------------------------
     w = _spectrum(C)
     if w is not None and w.size >= 1:
-        try:
-            pr = _participation_ratio(w)
-            out["participation_ratio"] = pr
-            if np.isfinite(pr) and d >= 1:
-                out["intrinsic_dim_frac"] = float(np.clip(pr / d, 0.0, 1.0))
-        except Exception:
-            pass
+        pr = _participation_ratio(w)
+        out["participation_ratio"] = pr
+        if np.isfinite(pr) and d >= 1:
+            out["intrinsic_dim_frac"] = float(np.clip(pr / d, 0.0, 1.0))
 
-        try:
-            ed = _energy_dim(w, 0.9)
-            out["energy_dim_90"] = ed
-            if np.isfinite(ed) and d >= 1:
-                out["energy_dim_frac"] = float(np.clip(ed / d, 0.0, 1.0))
-        except Exception:
-            pass
+        ed = _energy_dim(w, 0.9)
+        out["energy_dim_90"] = ed
+        if np.isfinite(ed) and d >= 1:
+            out["energy_dim_frac"] = float(np.clip(ed / d, 0.0, 1.0))
 
-        try:
-            out["spectral_decay_slope"] = _decay_slope(w)
-        except Exception:
-            pass
+        out["spectral_decay_slope"] = _decay_slope(w)
 
-        try:
-            s = float(np.sum(w))
-            out["top_eig_frac"] = float(w[0] / s) if s > _TINY else np.nan
-        except Exception:
-            pass
+        s = float(np.sum(w))
+        out["top_eig_frac"] = float(w[0] / s) if s > _TINY else np.nan
 
-        try:
-            out["spectral_entropy"] = _spectral_entropy(w)
-        except Exception:
-            pass
+        out["spectral_entropy"] = _spectral_entropy(w)
 
     # -- per-coordinate sensitivity spread (diagonal of C = mean squared gradient per input) ---
-    try:
-        diag = np.clip(np.diag(np.asarray(C, dtype=float)), 0.0, None)
-        out["sensitivity_gini"] = _gini(diag)
+    diag = np.clip(np.diag(np.asarray(C, dtype=float)), 0.0, None)
+    out["sensitivity_gini"] = _gini(diag)
+    if diag.size >= 2:
         m = float(np.mean(diag))
-        if m > _TINY and diag.size >= 2:
+        if m > _TINY:
             out["sensitivity_cv"] = float(np.std(diag) / m)
-        elif diag.size < 2:
-            out["sensitivity_cv"] = np.nan
-        else:
-            out["sensitivity_cv"] = np.nan
-    except Exception:
-        pass
 
     return out

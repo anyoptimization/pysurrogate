@@ -2,29 +2,10 @@
 
 import numpy as np
 
+from ._util import _safe_float, _skewness
+
 # ``np.trapz`` was renamed to ``np.trapezoid`` in NumPy 2.0 and removed; support both.
 _trapezoid = getattr(np, "trapezoid", None) or np.trapz  # type: ignore[attr-defined]
-
-
-def _safe_float(x):
-    """Coerce a value to a finite Python float, mapping non-finite results to ``np.nan``."""
-    try:
-        v = float(x)
-    except (TypeError, ValueError):
-        return np.nan
-    return v if np.isfinite(v) else np.nan
-
-
-def _skewness(y):
-    """Fisher (moment) skewness of ``y``; ``nan`` when variance is ~zero."""
-    n = y.size
-    if n < 3:
-        return np.nan
-    m = np.mean(y)
-    s = np.std(y)
-    if s <= 1e-12:
-        return np.nan
-    return _safe_float(np.mean(((y - m) / s) ** 3))
 
 
 def _excess_kurtosis(y):
@@ -144,7 +125,7 @@ def compute(ctx) -> dict:
 
     # KDE-based features (entropy + multimodality).
     try:
-        grid, dens, _ = _kde_grid(y)
+        grid, dens, bw = _kde_grid(y)
         out["diff_entropy"] = _differential_entropy(grid, dens)
         out["n_modes"] = _n_modes(grid, dens)
         # Fraction of probability mass within one bandwidth of the tallest peak: high => a
@@ -153,10 +134,8 @@ def compute(ctx) -> dict:
             total = _trapezoid(dens, grid)
             if total > 1e-12:
                 pk = int(np.argmax(dens))
-                span = grid[-1] - grid[0]
-                half = 0.05 * span
-                mask = np.abs(grid - grid[pk]) <= half
-                out["peak_concentration"] = _safe_float(_trapezoid(dens[mask], grid[mask]) / total)
+                mask = np.abs(grid - grid[pk]) <= bw
+                out["peak_concentration"] = _trapezoid(dens[mask], grid[mask]) / total
     except Exception:
         pass
 
@@ -164,20 +143,18 @@ def compute(ctx) -> dict:
     out["tail_index"] = _tail_index(y)
 
     # Spread / dynamic range.
-    try:
-        ymin, ymax = float(np.min(y)), float(np.max(y))
-        rng = ymax - ymin
-        out["dynamic_range"] = _safe_float(rng)
-        mean_abs = abs(float(np.mean(y)))
-        s = float(np.std(y))
-        if mean_abs > 1e-12:
-            out["coef_variation"] = _safe_float(s / mean_abs)
-        if rng > 1e-12:
-            iqr = float(np.subtract(*np.percentile(y, [75, 25])))
-            out["iqr_range_ratio"] = _safe_float(iqr / rng)
-            # Nonparametric skew: (mean - median) / range, robust and bounded.
-            out["median_skew"] = _safe_float((float(np.mean(y)) - float(np.median(y))) / rng)
-    except Exception:
-        pass
+    ymin, ymax = float(np.min(y)), float(np.max(y))
+    rng = ymax - ymin
+    out["dynamic_range"] = rng
+    mean_abs = abs(float(np.mean(y)))
+    s = float(np.std(y))
+    if mean_abs > 1e-12:
+        out["coef_variation"] = s / mean_abs
+    if rng > 1e-12:
+        iqr = float(np.subtract(*np.percentile(y, [75, 25])))
+        out["iqr_range_ratio"] = iqr / rng
+        # Nonparametric skew: (mean - median) / range, robust and bounded.
+        out["median_skew"] = (float(np.mean(y)) - float(np.median(y))) / rng
 
+    # single scrub at the boundary: plain floats only, non-finite reads as nan.
     return {k: _safe_float(v) for k, v in out.items()}

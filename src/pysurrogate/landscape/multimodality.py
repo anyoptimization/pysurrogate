@@ -2,14 +2,7 @@
 
 import numpy as np
 
-
-def _safe_float(x):
-    """Coerce a value to a finite Python float, mapping non-finite results to ``np.nan``."""
-    try:
-        v = float(x)
-    except (TypeError, ValueError):
-        return np.nan
-    return v if np.isfinite(v) else np.nan
+from ._util import _safe_float
 
 
 def _local_min_mask(ys, idx):
@@ -128,14 +121,14 @@ def compute(ctx) -> dict:
     fracs_arr = np.asarray(fracs, dtype=float)
     max_fracs_arr = np.asarray(max_fracs, dtype=float)
 
-    # Reference features at the default neighborhood size.
+    # Reference features at the default neighborhood size (the sweep usually already contains
+    # this k, so the mask is reused rather than recomputed).
     k0 = ctx.default_k()
     k0 = int(np.clip(k0, 2, max(2, n - 1)))
-    try:
-        idx0, _ = ctx.knn(k0)
+    idx0, _ = ctx.knn(k0)
+    mask0 = per_k_masks.get(k0)
+    if mask0 is None:
         mask0 = _local_min_mask(ys, idx0)
-    except Exception:
-        mask0 = per_k_masks[ks[len(ks) // 2]]
 
     n_min0 = int(np.sum(mask0))
     out["local_min_frac"] = _safe_float(np.mean(mask0))
@@ -168,30 +161,24 @@ def compute(ctx) -> dict:
         out["min_max_ratio"] = np.nan
 
     # Depth of the default-k minima: how far each sits below its neighborhood mean (in std units).
-    try:
-        if n_min0 > 0:
-            neigh_mean = ys[idx0].mean(axis=1)
-            depths = neigh_mean[mask0] - ys[mask0]
-            out["min_depth_mean"] = _safe_float(np.mean(depths))
-        else:
-            out["min_depth_mean"] = 0.0
-    except Exception:
-        out["min_depth_mean"] = np.nan
+    if n_min0 > 0:
+        neigh_mean = ys[idx0].mean(axis=1)
+        depths = neigh_mean[mask0] - ys[mask0]
+        out["min_depth_mean"] = _safe_float(np.mean(depths))
+    else:
+        out["min_depth_mean"] = 0.0
 
     # Spatial dispersion of the detected minima: mean pairwise distance between minima relative to
     # the overall cloud scale. High => basins spread across the domain; low/nan => few or clustered.
-    try:
-        if n_min0 >= 2:
-            D = ctx.distances()
-            mi = np.where(mask0)[0]
-            sub = D[np.ix_(mi, mi)]
-            iu = np.triu_indices(mi.size, k=1)
-            mean_min_dist = float(np.mean(sub[iu]))
-            overall = float(np.mean(D[np.triu_indices(n, k=1)]))
-            out["basin_dispersion"] = _safe_float(mean_min_dist / overall) if overall > 1e-12 else np.nan
-        else:
-            out["basin_dispersion"] = 0.0
-    except Exception:
-        out["basin_dispersion"] = np.nan
+    if n_min0 >= 2:
+        D = ctx.distances()
+        mi = np.where(mask0)[0]
+        sub = D[np.ix_(mi, mi)]
+        iu = np.triu_indices(mi.size, k=1)
+        mean_min_dist = float(np.mean(sub[iu]))
+        overall = float(np.mean(D[np.triu_indices(n, k=1)]))
+        out["basin_dispersion"] = _safe_float(mean_min_dist / overall) if overall > 1e-12 else np.nan
+    else:
+        out["basin_dispersion"] = 0.0
 
     return {k: _safe_float(v) for k, v in out.items()}

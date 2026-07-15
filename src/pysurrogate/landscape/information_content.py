@@ -2,14 +2,7 @@
 
 import numpy as np
 
-
-def _safe_float(x):
-    """Coerce a value to a finite Python float, mapping non-finite results to ``np.nan``."""
-    try:
-        v = float(x)
-    except (TypeError, ValueError):
-        return np.nan
-    return v if np.isfinite(v) else np.nan
+from ._util import _safe_float
 
 
 def _nn_tour(D, start, n):
@@ -70,11 +63,13 @@ def _symbolize(r, eps):
 
 
 def _information_content(phi):
-    """Shannon information content of the symbol string over its non-equal consecutive pairs.
+    """Shannon information content of the symbol string's consecutive-pair transitions.
 
-    Blocks of equal successive symbols carry no information; the entropy is taken over the (up to
-    six) distinct ordered pairs ``(p, q)`` with ``p != q`` and normalized by ``log 6`` so the
-    result lies in ``[0, 1]`` (1 == maximally rugged / unpredictable transitions).
+    Following Munoz et al. (2015), each probability is the count of one of the (up to six)
+    distinct ordered pairs ``(p, q)`` with ``p != q`` divided by the number of ALL consecutive
+    pairs ``len(phi) - 1`` -- equal pairs carry no information themselves but still belong in the
+    denominator, so long flat runs dilute the entropy. Normalized by ``log 6`` so the result lies
+    in ``[0, 1]`` (1 == maximally rugged / unpredictable transitions).
 
     Args:
         phi: The symbol sequence in ``{-1, 0, 1}``.
@@ -87,14 +82,13 @@ def _information_content(phi):
     a = phi[:-1]
     b = phi[1:]
     diff = a != b
-    m = int(np.count_nonzero(diff))
-    if m == 0:
+    if not np.any(diff):
         return 0.0
     # encode each differing ordered pair as one of the six symbols and count them
     code = (a[diff] + 1) * 3 + (b[diff] + 1)
     counts = np.bincount(code, minlength=9)
     counts = counts[counts > 0]
-    p = counts / m
+    p = counts / (phi.shape[0] - 1)
     return float(-np.sum(p * np.log(p)) / np.log(6.0))
 
 
@@ -164,10 +158,7 @@ def compute(ctx) -> dict:
 
         # Collect per-step slopes from several nearest-neighbor walks for a stable curve estimate.
         n_walks = int(min(5, n))
-        try:
-            starts = ctx.rng.choice(n, size=n_walks, replace=False)
-        except Exception:
-            starts = np.arange(n_walks)
+        starts = ctx.rng_for("information_content").choice(n, size=n_walks, replace=False)
 
         rlist = []
         for s in starts:

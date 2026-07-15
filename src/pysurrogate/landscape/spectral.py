@@ -149,84 +149,56 @@ def compute(ctx) -> dict:
     wmax = wmax if wmax > 1e-12 else 1.0
 
     # --- Rayleigh quotient ys^T L ys / ys^T ys = energy-weighted mean eigenvalue (0 smooth -> 2 rugged)
-    try:
-        out["rayleigh"] = float(np.sum(w * energy))
-    except Exception:
-        pass
+    out["rayleigh"] = float(np.sum(w * energy))
 
     # --- spectral centroid: Rayleigh normalized to [0, 1] by the largest graph frequency
-    try:
-        if np.isfinite(out["rayleigh"]):
-            out["spectral_centroid"] = float(np.clip(out["rayleigh"] / wmax, 0.0, 1.0))
-    except Exception:
-        pass
+    if np.isfinite(out["rayleigh"]):
+        out["spectral_centroid"] = float(np.clip(out["rayleigh"] / wmax, 0.0, 1.0))
 
     # Drop the trivial (near-zero) mode so fractions describe genuine variation, not the DC offset.
-    try:
-        nontrivial = w > 1e-9 * wmax
-        if int(np.count_nonzero(nontrivial)) >= 2:
-            w_nz = w[nontrivial]
-            e_nz = energy[nontrivial]
-            es = float(e_nz.sum())
-            e_nz = e_nz / es if es > 1e-12 else e_nz
-        else:
-            w_nz, e_nz = w, energy
-    except Exception:
+    nontrivial = w > 1e-9 * wmax
+    if int(np.count_nonzero(nontrivial)) >= 2:
+        w_nz = w[nontrivial]
+        e_nz = energy[nontrivial]
+        es = float(e_nz.sum())
+        e_nz = e_nz / es if es > 1e-12 else e_nz
+    else:
         w_nz, e_nz = w, energy
 
     mm = w_nz.size
 
     # --- low-frequency energy fraction: signal energy in the smoothest 20% of the spectrum
-    try:
-        cut = max(1, int(np.ceil(0.2 * mm)))
-        out["low_energy_frac"] = float(np.clip(np.sum(e_nz[:cut]), 0.0, 1.0))
-    except Exception:
-        pass
+    cut = max(1, int(np.ceil(0.2 * mm)))
+    out["low_energy_frac"] = float(np.clip(np.sum(e_nz[:cut]), 0.0, 1.0))
 
     # --- high-frequency energy fraction: signal energy in the ruggedest 20% of the spectrum
-    try:
-        cut = max(1, int(np.ceil(0.2 * mm)))
-        out["high_energy_frac"] = float(np.clip(np.sum(e_nz[-cut:]), 0.0, 1.0))
-    except Exception:
-        pass
+    out["high_energy_frac"] = float(np.clip(np.sum(e_nz[-cut:]), 0.0, 1.0))
 
     # --- spectral entropy: Shannon entropy of the energy spread, normalized to [0, 1].
     #     ~0 when a single frequency dominates (structured/periodic), ~1 when energy is uniform (noise).
-    try:
-        p = e_nz[e_nz > 0]
-        if p.size >= 2:
-            ent = -float(np.sum(p * np.log(p)))
-            out["spectral_entropy"] = float(np.clip(ent / np.log(mm), 0.0, 1.0))
-        elif p.size == 1:
-            out["spectral_entropy"] = 0.0
-    except Exception:
-        pass
+    p = e_nz[e_nz > 0]
+    if p.size >= 2:
+        ent = -float(np.sum(p * np.log(p)))
+        out["spectral_entropy"] = float(np.clip(ent / np.log(mm), 0.0, 1.0))
+    elif p.size == 1:
+        out["spectral_entropy"] = 0.0
 
     # --- dominant frequency: normalized eigenvalue of the single most energetic mode (0 smooth->1 rugged)
-    try:
-        j = int(np.argmax(e_nz))
-        out["dominant_freq"] = float(np.clip(w_nz[j] / wmax, 0.0, 1.0))
-    except Exception:
-        pass
+    j = int(np.argmax(e_nz))
+    out["dominant_freq"] = float(np.clip(w_nz[j] / wmax, 0.0, 1.0))
 
     # --- spectral rolloff: normalized frequency below which 85% of the signal energy accumulates
-    try:
-        order = np.argsort(w_nz)
-        cum = np.cumsum(e_nz[order])
-        hit = np.where(cum >= 0.85)[0]
-        if hit.size > 0:
-            out["spectral_rolloff"] = float(np.clip(w_nz[order][hit[0]] / wmax, 0.0, 1.0))
-    except Exception:
-        pass
+    #     (``w_nz`` is already ascending, so no re-sort is needed)
+    cum = np.cumsum(e_nz)
+    hit = np.where(cum >= 0.85)[0]
+    if hit.size > 0:
+        out["spectral_rolloff"] = float(np.clip(w_nz[hit[0]] / wmax, 0.0, 1.0))
 
     # --- participation ratio: effective fraction of modes carrying signal (inverse Simpson / m).
     #     Small -> energy concentrated in a few frequencies (low-rank/periodic structure);
     #     large -> energy spread across many frequencies (broadband / noisy landscape).
-    try:
-        denom = float(np.sum(e_nz**2))
-        if denom > 1e-12:
-            out["participation_ratio"] = float(np.clip((1.0 / denom) / mm, 0.0, 1.0))
-    except Exception:
-        pass
+    denom = float(np.sum(e_nz**2))
+    if denom > 1e-12:
+        out["participation_ratio"] = float(np.clip((1.0 / denom) / mm, 0.0, 1.0))
 
     return out

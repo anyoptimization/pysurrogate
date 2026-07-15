@@ -2,22 +2,7 @@
 
 import numpy as np
 
-
-def _adj_r2(r2, n, p):
-    """Adjusted R² correcting a fit's R² for its ``p`` predictors and ``n`` samples.
-
-    Args:
-        r2: In-sample coefficient of determination.
-        n: Number of samples.
-        p: Number of predictors (excluding the intercept).
-
-    Returns:
-        The adjusted R², or ``np.nan`` when there are too few degrees of freedom.
-    """
-    denom = n - p - 1
-    if denom <= 0:
-        return np.nan
-    return float(1.0 - (1.0 - r2) * (n - 1) / denom)
+from ._util import _adj_r2, _safe_float
 
 
 def compute(ctx) -> dict:
@@ -92,13 +77,9 @@ def compute(ctx) -> dict:
             bmin = float(np.min(nz)) if nz.size else 0.0
             out["lin_coef_min"] = bmin
             out["lin_coef_max"] = bmax
-            if bmin > 1e-12:
-                out["lin_coef_spread"] = float(bmax / bmin)
-            elif bmax > 1e-12:
-                # some coefficient is (numerically) zero -> unbounded spread.
-                out["lin_coef_spread"] = np.inf
-            else:
-                out["lin_coef_spread"] = np.nan
+            # spread is undefined (nan) when some coefficient is numerically zero -- the feature
+            # contract has no inf.
+            out["lin_coef_spread"] = float(bmax / bmin) if bmin > 1e-12 else np.nan
 
         # conditioning of the pure curvature: ratio of largest to smallest |square-term| coef.
         # hessian diagonal = 2 * square-term coefficients.
@@ -106,9 +87,7 @@ def compute(ctx) -> dict:
         curv = curv[np.isfinite(curv)]
         cnz = curv[curv > 1e-12]
         if cnz.size >= 1:
-            cmax = float(np.max(curv))
-            cmin = float(np.min(cnz))
-            out["quad_curv_cond"] = float(cmax / cmin) if cmin > 1e-12 else np.inf
+            out["quad_curv_cond"] = float(np.max(curv) / np.min(cnz))
         else:
             out["quad_curv_cond"] = np.nan
 
@@ -122,11 +101,5 @@ def compute(ctx) -> dict:
     except Exception:
         return out
 
-    # final scrub: coerce anything odd to float / nan (inf is allowed as a meaningful signal).
-    for k in keys:
-        v = out[k]
-        try:
-            out[k] = float(v)
-        except (TypeError, ValueError):
-            out[k] = np.nan
-    return out
+    # final scrub: plain floats only; non-finite (incl. inf) reads as nan per the feature contract.
+    return {k: _safe_float(v) for k, v in out.items()}

@@ -2,67 +2,7 @@
 
 import numpy as np
 
-
-def _safe_float(x):
-    """Coerce a value to a finite Python float, mapping non-finite results to ``np.nan``."""
-    try:
-        v = float(x)
-    except (TypeError, ValueError):
-        return np.nan
-    return v if np.isfinite(v) else np.nan
-
-
-def _corr(a, b):
-    """Pearson correlation of two 1-D arrays; ``nan`` when either has no spread or <3 points."""
-    a = np.asarray(a, dtype=float)
-    b = np.asarray(b, dtype=float)
-    m = np.isfinite(a) & np.isfinite(b)
-    a, b = a[m], b[m]
-    if a.size < 3:
-        return np.nan
-    if np.std(a) <= 1e-12 or np.std(b) <= 1e-12:
-        return np.nan
-    try:
-        return _safe_float(np.corrcoef(a, b)[0, 1])
-    except Exception:
-        return np.nan
-
-
-def _gini(x):
-    """Gini coefficient of a non-negative array (0 == perfectly equal, ->1 == concentrated)."""
-    x = np.asarray(x, dtype=float)
-    x = x[np.isfinite(x)]
-    if x.size == 0:
-        return np.nan
-    if np.any(x < 0):
-        x = x - x.min()
-    s = x.sum()
-    if s <= 1e-12:
-        return np.nan
-    xs = np.sort(x)
-    n = xs.size
-    idx = np.arange(1, n + 1)
-    return _safe_float((np.sum((2 * idx - n - 1) * xs)) / (n * s))
-
-
-def _adjacency(idx):
-    """Symmetrized k-NN adjacency: neighbor sets where ``i~j`` if either lists the other.
-
-    Args:
-        idx: Neighbor-index array of shape ``(n, k)`` from :meth:`Context.knn`.
-
-    Returns:
-        A list of length ``n`` whose ``i``-th entry is the set of neighbor indices of node ``i``.
-    """
-    n = idx.shape[0]
-    adj = [set() for _ in range(n)]
-    for i in range(n):
-        for j in idx[i]:
-            j = int(j)
-            if j != i:
-                adj[i].add(j)
-                adj[j].add(i)
-    return adj
+from ._util import _corr, _gini, _safe_float
 
 
 def _edges(adj):
@@ -142,8 +82,7 @@ def _better_neighbor_graph(idx, y):
     n = idx.shape[0]
     succ = np.arange(n)
     for i in range(n):
-        nb = idx[i]
-        nb = nb[nb != i]
+        nb = idx[i]  # self is already excluded by Context.knn
         if nb.size == 0:
             continue
         j = int(nb[np.argmin(y[nb])])
@@ -202,8 +141,9 @@ def compute(ctx) -> dict:
 
     Returns:
         A flat dict of float features describing fitness assortativity and edge smoothness, plain
-        and fitness-weighted clustering, the count and concentration of local-optima basins, and
-        the length of gradient-descent paths to those optima.
+        and fitness-weighted clustering, the fraction of points that are local-optima sinks
+        (``basin_frac``) and the concentration of their basins, and the length of gradient-descent
+        paths to those optima.
     """
     keys = [
         "fitness_assortativity",
@@ -211,7 +151,7 @@ def compute(ctx) -> dict:
         "edge_gap_cv",
         "weighted_clustering",
         "clustering_coef",
-        "basin_count",
+        "basin_frac",
         "largest_basin_frac",
         "basin_size_gini",
         "sink_fitness_spread",
@@ -229,7 +169,7 @@ def compute(ctx) -> dict:
         ys = ctx.ys
         y = ctx.y
 
-        adj = _adjacency(idx)
+        adj = ctx.adjacency()
         edges = _edges(adj)
 
         # -- assortativity & edge smoothness ---------------------------------------------------
@@ -269,7 +209,8 @@ def compute(ctx) -> dict:
 
         sinks = np.where(succ == np.arange(n))[0]
         n_sinks = int(sinks.size)
-        out["basin_count"] = _safe_float(n_sinks / n)
+        # fraction of points that are sinks (local optima) of the better-neighbor graph.
+        out["basin_frac"] = _safe_float(n_sinks / n)
 
         if n_sinks > 0:
             sizes = np.array([int(np.count_nonzero(basin == s)) for s in sinks], dtype=float)

@@ -2,44 +2,8 @@
 
 import numpy as np
 
-
-def _adj_r2(r2, n, p):
-    """Adjusted R² that deflates an in-sample fit by its parameter count.
-
-    Penalizes the raw coefficient of determination for the ``p`` fitted degrees of freedom so a
-    richer model whose extra terms only capture noise does not look better than a lean one.
-
-    Args:
-        r2: In-sample R² of the fit.
-        n: Number of samples.
-        p: Number of (non-intercept) fitted parameters.
-
-    Returns:
-        The adjusted R² clipped to ``[0, 1]``, or ``np.nan`` when it is not defined.
-    """
-    try:
-        if not np.isfinite(r2) or n - p - 1 <= 0:
-            return np.nan
-        adj = 1.0 - (1.0 - r2) * (n - 1.0) / (n - p - 1.0)
-        return float(np.clip(adj, 0.0, 1.0))
-    except Exception:
-        return np.nan
-
-
-def _r2(y, y_hat):
-    """In-sample R² of a prediction against ``y`` (0 when ``y`` is constant).
-
-    Args:
-        y: Observed targets.
-        y_hat: Predicted targets.
-
-    Returns:
-        The coefficient of determination as a float, 0.0 when ``y`` has no variance.
-    """
-    ss_tot = float(np.sum((y - np.mean(y)) ** 2))
-    if ss_tot <= 1e-300:
-        return 0.0
-    return float(1.0 - np.sum((y - y_hat) ** 2) / ss_tot)
+from ._context import _r2
+from ._util import _adj_r2, _safe_float
 
 
 def _poly_columns(x, deg):
@@ -144,7 +108,7 @@ def compute(ctx) -> dict:
                     out["max_pair_coupling"] = float(np.clip(np.max(np.abs(off)) / np.sqrt(total), 0.0, 1.0))
                 elif d >= 1:
                     # flat landscape: no curvature -> no detectable coupling either.
-                    out["hessian_offdiag_ratio"] = 0.0 if d > 1 else 0.0
+                    out["hessian_offdiag_ratio"] = 0.0
                     out["hessian_diag_dominance"] = 1.0
                     out["max_pair_coupling"] = 0.0
         except Exception:
@@ -229,10 +193,9 @@ def compute(ctx) -> dict:
         # apparent non-separability.
         adj_full = _adj_r2(r2_full, n, p_full)
         gain = 0.0
-        if adj_add is not None and adj_full is not None and np.isfinite(adj_add) and np.isfinite(adj_full):
+        if np.isfinite(adj_add) and np.isfinite(adj_full):
             gain = max(0.0, float(adj_full - adj_add))
-            denom = adj_full if adj_full > 1e-9 else np.nan
-            if np.isfinite(denom):
+            if adj_full > 1e-9:
                 # separability index: additive share of the total explained variance.
                 out["separability_index"] = float(np.clip(adj_add / adj_full, 0.0, 1.0))
             else:
@@ -248,11 +211,5 @@ def compute(ctx) -> dict:
     except Exception:
         pass
 
-    # final scrub: everything a plain float or nan.
-    for k in keys:
-        v = out[k]
-        try:
-            out[k] = float(v)
-        except (TypeError, ValueError):
-            out[k] = np.nan
-    return out
+    # final scrub: plain floats only; non-finite reads as nan per the feature contract.
+    return {k: _safe_float(v) for k, v in out.items()}

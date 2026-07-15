@@ -3,28 +3,7 @@
 import numpy as np
 from scipy.stats import rankdata  # type: ignore[import-untyped]
 
-
-def _safe_float(x):
-    """Coerce a value to a finite Python float, mapping non-finite results to ``np.nan``."""
-    try:
-        v = float(x)
-    except (TypeError, ValueError):
-        return np.nan
-    return v if np.isfinite(v) else np.nan
-
-
-def _pearson(a, b):
-    """Pearson correlation of two 1-D arrays; ``nan`` when either lacks spread or has <3 points."""
-    a = np.asarray(a, dtype=float)
-    b = np.asarray(b, dtype=float)
-    m = np.isfinite(a) & np.isfinite(b)
-    a, b = a[m], b[m]
-    if a.size < 3 or np.std(a) <= 1e-12 or np.std(b) <= 1e-12:
-        return np.nan
-    try:
-        return _safe_float(np.corrcoef(a, b)[0, 1])
-    except Exception:
-        return np.nan
+from ._util import _corr, _safe_float
 
 
 def _spearman(a, b):
@@ -36,7 +15,7 @@ def _spearman(a, b):
     if a.size < 3:
         return np.nan
     try:
-        return _pearson(rankdata(a), rankdata(b))
+        return _corr(rankdata(a), rankdata(b))
     except Exception:
         return np.nan
 
@@ -138,16 +117,17 @@ def compute(ctx) -> dict:
         fractions = [0.02, 0.05, 0.10, 0.25]
         fkeys = ["disp_02", "disp_05", "disp_10", "disp_25"]
         disp_vals = []
+        elite_means = {}
         for q, key in zip(fractions, fkeys):
             idx = _elite_indices(y, q)
             mean_elite = _mean_pairwise(D, idx)
+            elite_means[q] = mean_elite
             if np.isfinite(mean_elite) and np.isfinite(mean_all):
                 out[key] = _safe_float(mean_elite - mean_all)
                 disp_vals.append((q, mean_elite))
 
         # scale-free ratio for the 10% elite (elite spread / whole spread - 1)
-        idx10 = _elite_indices(y, 0.10)
-        mean_e10 = _mean_pairwise(D, idx10)
+        mean_e10 = elite_means[0.10]
         if np.isfinite(mean_e10) and np.isfinite(mean_all) and mean_all > 1e-12:
             out["disp_ratio_10"] = _safe_float(mean_e10 / mean_all - 1.0)
 
@@ -168,7 +148,7 @@ def compute(ctx) -> dict:
         yy = y[mask]
         yys = ys[mask]
         if db.size >= 3 and np.std(db) > 1e-12 and np.std(yy) > 1e-12:
-            out["fdc"] = _pearson(db, yy)
+            out["fdc"] = _corr(db, yy)
             out["fdc_spearman"] = _spearman(db, yy)
             # normalized slope: change in standardized fitness per unit distance to best.
             try:
