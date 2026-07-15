@@ -7,7 +7,7 @@ def _sample_pairs(ctx, n_pairs):
     """Draw random distinct index pairs ``(a, b)`` from the cloud.
 
     Args:
-        ctx: The shared context (uses ``ctx.rng`` and ``ctx.n``).
+        ctx: The shared context (uses ``ctx.rng_for("convexity")`` and ``ctx.n``).
         n_pairs: Desired number of pairs to draw.
 
     Returns:
@@ -17,8 +17,9 @@ def _sample_pairs(ctx, n_pairs):
     n = ctx.n
     if n < 2:
         return np.array([], dtype=int), np.array([], dtype=int)
-    a = ctx.rng.integers(0, n, size=n_pairs)
-    b = ctx.rng.integers(0, n, size=n_pairs)
+    rng = ctx.rng_for("convexity")
+    a = rng.integers(0, n, size=n_pairs)
+    b = rng.integers(0, n, size=n_pairs)
     ok = a != b
     return a[ok], b[ok]
 

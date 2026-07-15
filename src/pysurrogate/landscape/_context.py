@@ -10,6 +10,7 @@ independent yet never recompute a shared primitive.
 Convention: ``y`` is a minimization objective (lower is better); ``best`` is ``argmin(y)``.
 """
 
+import zlib
 from dataclasses import dataclass
 
 import numpy as np
@@ -61,10 +62,12 @@ class Context:
         y = np.asarray(y, dtype=float).ravel()
         if X.shape[0] != y.shape[0]:
             raise ValueError(f"X has {X.shape[0]} rows but y has {y.shape[0]}")
+        if y.shape[0] == 0:
+            raise ValueError("empty point cloud")
         self.X = X
         self.y = y
         self.n, self.d = X.shape
-        self.rng = np.random.default_rng(seed)
+        self.seed = int(seed)
 
         # inputs min-max normalized to [0, 1] per dimension (constant dims -> 0), so distances and
         # rotation are measured in the natural unit box; outputs standardized to zero-mean/unit-var.
@@ -75,13 +78,28 @@ class Context:
         self.ys = (y - float(np.mean(y))) / (sd if sd > 0 else 1.0)
 
         self.best = int(np.argmin(y))
-        self.worst = int(np.argmax(y))
 
         self._dist = None
         self._knn: dict = {}
+        self._adj: dict = {}
         self._quad = None
         self._grad: dict = {}
         self._gradcov: dict = {}
+
+    def rng_for(self, name):
+        """A fresh, deterministic random generator for one criterion family.
+
+        Every family draws from its own stream derived only from the context seed and a stable
+        hash of the family name, so the values a family produces cannot depend on which other
+        families ran (or in what order) before it.
+
+        Args:
+            name: The family name keying the stream.
+
+        Returns:
+            A ``numpy.random.Generator`` seeded from ``(seed, crc32(name))``.
+        """
+        return np.random.default_rng([self.seed, zlib.crc32(name.encode("utf-8"))])
 
     # -- distances / neighborhoods -------------------------------------------------------------
 
@@ -114,6 +132,33 @@ class Context:
             dist = np.take_along_axis(D, idx, axis=1)
             self._knn[k] = (idx, dist)
         return self._knn[k]
+
+    def adjacency(self, k=None):
+        """Symmetrized k-NN adjacency list on the normalized inputs (cached per ``k``).
+
+        The graph is undirected by union: an edge ``i~j`` exists when either point lists the
+        other among its ``k`` nearest neighbors. Callers must treat the returned sets as
+        read-only (the list is cached and shared).
+
+        Args:
+            k: Neighbors per point; defaults to :meth:`default_k`.
+
+        Returns:
+            A list of length ``n`` whose ``i``-th entry is the set of neighbor indices of ``i``.
+        """
+        k = int(k or self.default_k())
+        k = int(np.clip(k, 1, max(1, self.n - 1)))
+        if k not in self._adj:
+            idx, _ = self.knn(k)
+            adj: list[set] = [set() for _ in range(self.n)]
+            for i in range(self.n):
+                for j in idx[i]:
+                    j = int(j)
+                    if j != i:
+                        adj[i].add(j)
+                        adj[j].add(i)
+            self._adj[k] = adj
+        return self._adj[k]
 
     # -- second-order structure ----------------------------------------------------------------
 

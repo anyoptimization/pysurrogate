@@ -1,6 +1,7 @@
 """The Landscape facade: run every criterion family on one point cloud and merge into one view."""
 
 import importlib
+import warnings
 from typing import Any
 
 import numpy as np
@@ -40,22 +41,27 @@ class Landscape:
         X: Inputs, shape ``(n, d)``.
         y: Outputs, shape ``(n,)`` (minimization objective; lower is better).
         seed: Seed for any randomized feature.
+        strict: When ``True`` a failing family re-raises instead of being skipped with a warning.
 
     Attributes:
         ctx: The shared :class:`Context` all families read from.
     """
 
-    def __init__(self, X: Any, y: Any, seed: int = 0) -> None:
+    def __init__(self, X: Any, y: Any, seed: int = 0, strict: bool = False) -> None:
         self.ctx = Context(X, y, seed=seed)
         self._groups: dict[str, dict[str, float]] = {}
         for name in FAMILIES:
             module = importlib.import_module(f"{__package__}.{name}")
             try:
-                result = module.compute(self.ctx)
-            except Exception:
-                # A family must never take the whole analysis down; missing values read as nan.
-                result = {}
-            self._groups[name] = {k: float(v) for k, v in result.items()}
+                group = {k: float(v) for k, v in module.compute(self.ctx).items()}
+            except Exception as e:
+                # A family must never take the whole analysis down (unless asked to via
+                # ``strict``); its features are simply absent and read as nan via ``get``.
+                if strict:
+                    raise
+                warnings.warn(f"landscape family {name} failed: {e!r}", stacklevel=2)
+                group = {}
+            self._groups[name] = group
 
     def features(self) -> dict[str, float]:
         """The full flat feature dict keyed ``"<family>.<feature>"``.

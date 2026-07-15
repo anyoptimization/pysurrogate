@@ -2,47 +2,7 @@
 
 import numpy as np
 
-
-def _safe_float(x):
-    """Coerce a value to a finite Python float, mapping non-finite results to ``np.nan``."""
-    try:
-        v = float(x)
-    except (TypeError, ValueError):
-        return np.nan
-    return v if np.isfinite(v) else np.nan
-
-
-def _corr(a, b):
-    """Pearson correlation of two 1-D arrays; ``nan`` when either has no spread or <3 points."""
-    a = np.asarray(a, dtype=float)
-    b = np.asarray(b, dtype=float)
-    m = np.isfinite(a) & np.isfinite(b)
-    a, b = a[m], b[m]
-    if a.size < 3:
-        return np.nan
-    if np.std(a) <= 1e-12 or np.std(b) <= 1e-12:
-        return np.nan
-    try:
-        return _safe_float(np.corrcoef(a, b)[0, 1])
-    except Exception:
-        return np.nan
-
-
-def _gini(x):
-    """Gini coefficient of a non-negative array (0 == perfectly equal, ->1 == concentrated)."""
-    x = np.asarray(x, dtype=float)
-    x = x[np.isfinite(x)]
-    if x.size == 0:
-        return np.nan
-    if np.any(x < 0):
-        x = x - x.min()
-    s = x.sum()
-    if s <= 1e-12:
-        return np.nan
-    xs = np.sort(x)
-    n = xs.size
-    idx = np.arange(1, n + 1)
-    return _safe_float((np.sum((2 * idx - n - 1) * xs)) / (n * s))
+from ._util import _corr, _gini, _safe_float
 
 
 def _nn_nb_distances(ctx):
@@ -150,10 +110,8 @@ def compute(ctx) -> dict:
         # Fitness correlations (over points that have a defined nearest-better distance).
         if np.count_nonzero(nb_ok) >= 3:
             out["nb_fitness_cor"] = _corr(nb[nb_ok], y[nb_ok])
-            rr = np.full(n, np.nan)
             good = nb_ok & (nn > 1e-12)
-            rr[good] = nb[good] / nn[good]
-            out["ratio_fitness_cor"] = _corr(rr[good], y[good])
+            out["ratio_fitness_cor"] = _corr(nb[good] / nn[good], y[good])
 
         # Nearest-better graph indegree: how many points point at each node.
         indeg = np.zeros(n, dtype=float)

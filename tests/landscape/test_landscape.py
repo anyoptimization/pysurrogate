@@ -4,6 +4,10 @@ import numpy as np
 import pytest
 
 from pysurrogate.landscape import FAMILIES, Landscape
+from pysurrogate.landscape import distribution as distribution_mod
+from pysurrogate.landscape import variogram as variogram_mod
+from pysurrogate.landscape._context import Context
+from pysurrogate.landscape.information_content import _information_content
 
 # --------------------------------------------------------------------------------------------
 # Sampling designs and analytic benchmark functions with KNOWN structure.
@@ -282,3 +286,109 @@ def test_report_renders(L):
     text = L["ellipsoid_rot"].report()
     for token in ("Rotation", "Curvature", "Eff. dim", "Modality", "Separable", "Noise"):
         assert token in text
+
+
+# --------------------------------------------------------------------------------------------
+# Regression tests for reviewed fixes.
+# --------------------------------------------------------------------------------------------
+
+
+def test_information_content_entropy_counts_all_pairs():
+    """Entropy denominator is ALL consecutive pairs (Munoz et al. 2015), not differing ones only.
+
+    A long flat run must dilute the entropy: two differing pairs among twenty carry far less
+    information than two among two.
+    """
+    phi = np.array([1] * 10 + [-1] + [1] * 10, dtype=np.int8)
+    # 20 consecutive pairs total; exactly two differ: (1,-1) and (-1,1), once each.
+    p = np.array([1.0, 1.0]) / (phi.size - 1)
+    expected = float(-np.sum(p * np.log(p)) / np.log(6.0))
+    assert _information_content(phi) == pytest.approx(expected)
+    # the old counts/m normalization reported ln(2)/ln(6) ~ 0.387 regardless of the flat run.
+    assert _information_content(phi) < 0.25
+
+
+def test_rng_for_is_order_independent():
+    """Per-family generators are deterministic and immune to other families' draws."""
+    rng = np.random.default_rng(0)
+    X = rng.uniform(-1, 1, (30, 2))
+    y = np.sum(X**2, axis=1)
+    c1 = Context(X, y, seed=0)
+    c1.rng_for("convexity").integers(0, 1000, size=50)  # drain another family's stream first
+    a = c1.rng_for("information_content").integers(0, 1000, size=50)
+    c2 = Context(X, y, seed=0)
+    b = c2.rng_for("information_content").integers(0, 1000, size=50)
+    assert np.array_equal(a, b)
+    # distinct families get distinct streams
+    assert not np.array_equal(a, Context(X, y, seed=0).rng_for("convexity").integers(0, 1000, size=50))
+
+
+def test_family_failure_warns_and_strict_raises(monkeypatch):
+    """A failing family warns and is skipped by default, but re-raises under ``strict=True``."""
+    import pysurrogate.landscape.convexity as convexity_mod
+
+    def boom(ctx):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(convexity_mod, "compute", boom)
+    rng = np.random.default_rng(2)
+    X = rng.uniform(-1, 1, (40, 2))
+    y = np.sum(X**2, axis=1)
+    with pytest.warns(UserWarning, match="convexity failed"):
+        lp = Landscape(X, y)
+    assert lp.groups()["convexity"] == {}
+    assert np.isnan(lp.get("convexity.convex_frac"))
+    with pytest.raises(RuntimeError, match="boom"):
+        Landscape(X, y, strict=True)
+
+
+def test_curvature_flat_frac_detects_ridge(L):
+    """flat_frac exposes rank-deficient (ridge) Hessians the condition number deliberately skips."""
+    assert L["ridge"].get("curvature.flat_frac") > 0.5
+    assert L["sphere"].get("curvature.flat_frac") < 0.2
+
+
+def test_variogram_near_origin_convexity_requires_uniform_bins():
+    """The second-difference probe only fires on a near-uniform bin grid, else reads nan."""
+
+    class _Stub:
+        """A minimal context stub exposing exactly what ``variogram.compute`` reads."""
+
+        ys = np.linspace(0.0, 1.0, 10)
+
+        def __init__(self, h):
+            self._h = np.asarray(h, dtype=float)
+
+        def variogram(self):
+            """Return the stubbed ``(h, gamma)`` curve."""
+            return self._h, np.array([0.1, 0.2, 0.5, 0.7])
+
+    uniform = variogram_mod.compute(_Stub([0.1, 0.2, 0.3, 0.4]))
+    assert np.isfinite(uniform["near_origin_convexity"])
+    # a dropped bin leaves a gap between the second and third centers -> probe undefined
+    gapped = variogram_mod.compute(_Stub([0.1, 0.2, 0.5, 0.6]))
+    assert np.isnan(gapped["near_origin_convexity"])
+
+
+def test_peak_concentration_uses_kde_bandwidth():
+    """Peak mass is measured within the KDE bandwidth, not a fraction of the (outlier-prone) span."""
+    rng = np.random.default_rng(0)
+    y = np.concatenate([rng.normal(0.0, 1.0, 300), [100.0]])
+    X = rng.uniform(-1, 1, (y.size, 2))
+    out = distribution_mod.compute(Context(X, y))
+    # the old 5%-of-span half-width spanned ~5 units here and reported ~all mass at the peak.
+    assert out["peak_concentration"] < 0.6
+
+
+def test_context_rejects_empty_cloud():
+    """An empty point cloud fails fast with an explicit error, not a cryptic argmin failure."""
+    with pytest.raises(ValueError, match="empty point cloud"):
+        Context(np.empty((0, 3)), np.empty(0))
+
+
+def test_network_basin_count_renamed_to_basin_frac(L):
+    """The sink fraction is exposed as ``basin_frac``; the misleading old name is gone."""
+    sph = L["sphere"]
+    assert not np.isnan(sph.get("network.basin_frac"))
+    assert 0.0 < sph.get("network.basin_frac") <= 1.0
+    assert "basin_count" not in sph.groups()["network"]

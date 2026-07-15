@@ -2,37 +2,7 @@
 
 import numpy as np
 
-
-def _safe_float(x):
-    """Coerce a value to a finite Python float, mapping non-finite results to ``np.nan``."""
-    try:
-        v = float(x)
-    except (TypeError, ValueError):
-        return np.nan
-    return v if np.isfinite(v) else np.nan
-
-
-def _adjacency(ctx, k):
-    """Symmetric (mutual-union) k-NN adjacency list on the normalized inputs.
-
-    Args:
-        ctx: The landscape context.
-        k: Neighbors per point used to build the graph.
-
-    Returns:
-        A list of length ``n`` whose ``i``-th entry is a set of neighbor indices; the graph is
-        undirected (an edge exists if either endpoint lists the other among its ``k`` neighbors).
-    """
-    idx, _ = ctx.knn(k)
-    n = ctx.n
-    adj = [set() for _ in range(n)]
-    for i in range(n):
-        for j in idx[i]:
-            j = int(j)
-            if j != i:
-                adj[i].add(j)
-                adj[j].add(i)
-    return adj
+from ._util import _safe_float
 
 
 def _persistence(ys, adj):
@@ -44,7 +14,7 @@ def _persistence(ys, adj):
 
     Args:
         ys: Standardized outputs, shape ``(n,)``.
-        adj: Neighbor adjacency list (from :func:`_adjacency`).
+        adj: Neighbor adjacency list (from :meth:`Context.adjacency`).
 
     Returns:
         A tuple ``(persistences, n_basins, final_components, alive_seq, order)`` where
@@ -174,7 +144,7 @@ def compute(ctx) -> dict:
 
     try:
         k = int(np.clip(ctx.default_k(), 2, max(2, n - 1)))
-        adj = _adjacency(ctx, k)
+        adj = ctx.adjacency(k)
     except Exception:
         return out
 
