@@ -56,3 +56,18 @@ def test_kriging_eliminates_duplicates_by_default():
     # duplicate points would make the correlation matrix singular; the adapter drops them
     model = Kriging(corr=Gaussian()).fit(Xd, yd)
     assert model.success and len(model.X) == len(X)
+
+
+def test_kriging_respects_active_dims_on_fit_refit_and_predict():
+    # regression (DaceBackedModel._refit): the target uses only inputs 0 and 2. With active_dims the
+    # engine trains on the 2 selected columns; refit previously bypassed preprocess and handed the
+    # engine full-width raw inputs, crashing on the active-dims mismatch. It must now fit/refit/predict.
+    rng = np.random.RandomState(3)
+    X = rng.uniform(-1, 1, size=(40, 4))
+    y = np.sin(3 * X[:, [0]]) + X[:, [2]] ** 2
+    model = Kriging(corr=Gaussian(), active_dims=[0, 2]).fit(X, y, optimize=False)
+    assert model.X.shape[1] == 2  # engine saw only the 2 active dims
+    Xnew = rng.uniform(-1, 1, size=(8, 4))
+    ynew = np.sin(3 * Xnew[:, [0]]) + Xnew[:, [2]] ** 2
+    model.refit(Xnew, ynew, optimize=False)  # must not raise despite full-width raw inputs
+    assert np.all(np.isfinite(model.predict(X[:5]).y))

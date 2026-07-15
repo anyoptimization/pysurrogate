@@ -58,7 +58,9 @@ class Partitioning:
             tst = np.asarray(tst, dtype=int)
             valid = None
             if self.valid_frac > 0 and len(trn) > 1:
-                n_valid = max(1, int(round(self.valid_frac * len(trn))))
+                # clamp so at least one training row survives: a valid_frac near 1 (or a tiny fold)
+                # would otherwise carve the whole training set into validation and leave train empty.
+                n_valid = min(max(1, int(round(self.valid_frac * len(trn)))), len(trn) - 1)
                 perm = rng.permutation(len(trn))
                 valid, trn = trn[perm[:n_valid]], trn[perm[n_valid:]]
             splits.append(Split(train=trn, test=tst, valid=valid))

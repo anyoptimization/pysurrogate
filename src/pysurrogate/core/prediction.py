@@ -5,6 +5,21 @@ from dataclasses import dataclass
 import numpy as np
 
 
+def sigma_from_var(var):
+    """Predictive standard deviation ``sqrt(max(var, 0))`` -- the one clamp-then-root of variance.
+
+    Clamps the variance non-negative before the square root so round-off (or a backend returning a
+    tiny negative kriging MSE) yields ``0`` rather than a ``NaN``.
+
+    Args:
+        var: Predictive variance array.
+
+    Returns:
+        ``sqrt(clip(var, 0, None))``, same shape as ``var``.
+    """
+    return np.sqrt(np.clip(var, 0.0, None))
+
+
 @dataclass(frozen=True)
 class Prediction:
     """The result of any ``predict`` call: the mean plus any requested extras, named.
@@ -50,7 +65,7 @@ class Prediction:
         """
         if self.var is None:
             return None
-        return np.sqrt(np.clip(self.var, 0.0, None))
+        return sigma_from_var(self.var)
 
     @property
     def mse(self) -> np.ndarray | None:
@@ -97,7 +112,7 @@ def predictions_frame(X, y_true, pred, **labels):
     q = y_hat.shape[1]
     # variance/sigma are shared across outputs; NaN when the model reports no uncertainty
     var = np.full(m, np.nan) if pred.var is None else np.asarray(pred.var).ravel()
-    sigma = np.sqrt(np.clip(var, 0.0, None))
+    sigma = sigma_from_var(var)
 
     df = pd.DataFrame(
         {

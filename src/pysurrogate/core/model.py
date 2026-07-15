@@ -1,7 +1,5 @@
 """Base ``Model`` class: the fit/predict lifecycle with pre- and post-processing."""
 
-import time
-
 import numpy as np
 
 from pysurrogate.core.prediction import Prediction, predictions_frame
@@ -13,7 +11,7 @@ class Model:
     """Backend-agnostic surrogate with a shared fit/predict lifecycle.
 
     A concrete surrogate subclasses ``Model`` and implements the hooks ``_fit`` and
-    ``_predict`` (and optionally ``_optimize`` / ``_preprocess`` / ``_postprocess``). The
+    ``_predict`` (and optionally ``_preprocess`` / ``_postprocess``). The
     public ``fit`` and ``predict`` wrap those hooks with the common machinery every backend
     shares: input promotion to 2-D, normalization, nan/inf filtering, duplicate elimination,
     active-dimension selection, exception capture, and un-normalizing the returned
@@ -30,9 +28,13 @@ class Model:
         eliminate_duplicates_eps=1e-16,
         raise_exception_while_fitting=True,
         raise_exception_while_prediction=True,
-        verbose=False,
         **kwargs,
     ):
+        # unknown keyword arguments are typos (e.g. `norm_x=`), not configuration -- swallowing
+        # them silently hid misconfigured models, so reject anything no subclass consumed.
+        if kwargs:
+            raise TypeError(f"{type(self).__name__} got unexpected keyword argument(s): {sorted(kwargs)}")
+
         self.norm_X = norm_X if norm_X is not None else NoNormalization()
         self.norm_y = norm_y if norm_y is not None else NoNormalization()
 
@@ -41,14 +43,11 @@ class Model:
 
         self.active_dims = active_dims
         self.filter_nan_and_inf = filter_nan_and_inf
-        self.verbose = verbose
 
-        self.time = None
         self.model = None
         self.X, self.y = None, None
         self._X, self._y = None, None
         self.success = None
-        self.data = {}
 
         self.raise_exception_while_fitting = raise_exception_while_fitting
         self.raise_exception_while_prediction = raise_exception_while_prediction
@@ -57,7 +56,7 @@ class Model:
         self.has_been_fitted = False
 
         # prequential (out-of-sample) validation log accumulated across refit() calls -- the tidy
-        # predictions DataFrame (with an ``epoch`` column), exposed via records(). epoch counts
+        # predictions DataFrame (with an ``epoch`` column), exposed via history(). epoch counts
         # refit calls.
         self._validation = None
         self._epoch = 0
@@ -67,6 +66,16 @@ class Model:
         self._calibration = 1.0
 
     def preprocess(self, X, y, **kwargs):
+        """Run the shared input pipeline: active-dims, duplicate/nan filtering, normalization.
+
+        Args:
+            X: Training inputs, shape ``(n, d)``.
+            y: Training targets, shape ``(n, q)``.
+            **kwargs: Forwarded to the backend's ``_preprocess`` hook.
+
+        Returns:
+            The prepared ``(X, y)`` in the normalized space the backend fits in.
+        """
         if self.active_dims is not None:
             X = X[:, self.active_dims]
 
@@ -84,6 +93,14 @@ class Model:
         return X, y
 
     def postprocess(self, pred):
+        """Carry a backend prediction back to original units through the affine norm scales.
+
+        Args:
+            pred: The backend's :class:`~pysurrogate.core.prediction.Prediction` in normalized space.
+
+        Returns:
+            The un-normalized prediction, after the backend's ``_postprocess`` hook.
+        """
         y = self.norm_y.backward(pred.y)
         var, grad, var_grad = pred.var, pred.grad, pred.var_grad
 
@@ -93,15 +110,19 @@ class Model:
         # when no extras were requested, so a plain mean prediction is untouched, and identity
         # norms make every factor 1.
         if var is not None or grad is not None or var_grad is not None:
-            s_y, s_X = self.norm_y.scale(), self.norm_X.scale()
+            s_y = self.norm_y.scale()
             # the calibration scale (calibrate()) multiplies the variance and its gradient -- 1.0
             # until calibrated, so an uncalibrated model is untouched. The mean gradient is unscaled.
             if var is not None:
                 var = var * s_y**2 * self._calibration
-            if grad is not None:
-                grad = grad * s_y / s_X
-            if var_grad is not None:
-                var_grad = var_grad * s_y**2 / s_X * self._calibration
+            # the input scale is needed only for the gradients; fetching it lazily keeps a
+            # var-only predict working under a non-affine norm_X (e.g. Plog), whose scale() raises.
+            if grad is not None or var_grad is not None:
+                s_X = self.norm_X.scale()
+                if grad is not None:
+                    grad = grad * s_y / s_X
+                if var_grad is not None:
+                    var_grad = var_grad * s_y**2 / s_X * self._calibration
 
         pred = Prediction(y=y, var=var, grad=grad, var_grad=var_grad)
         return self._postprocess(pred)
@@ -121,7 +142,8 @@ class Model:
             **kwargs: Backend-specific fit options, forwarded to ``_fit``.
         """
         X, y = at_least2d(X, expand="r"), at_least2d(y, expand="c")
-        assert len(X) == len(y)
+        if len(X) != len(y):
+            raise ValueError(f"X and y must have the same number of rows, got {len(X)} and {len(y)}.")
         self._X, self._y = X, y
 
         # a fresh fit invalidates any prior variance calibration -- reset to the identity.
@@ -133,19 +155,16 @@ class Model:
         self.norm_y.reset()
         self.X, self.y = self.preprocess(X, y)
 
-        start = time.time()
         try:
             self._fit(self.X, self.y, optimize=optimize, **kwargs)
-            self._optimize(**kwargs)
             self.success = True
+            self.has_been_fitted = True  # only a successful fit counts as fitted
         except Exception as ex:
             self.success = False
             self.exception = ex
             if self.raise_exception_while_fitting:
                 raise ex
 
-        self.has_been_fitted = True
-        self.time = time.time() - start
         return self
 
     def refit(self, X, y, optimize=True, metrics=None):
@@ -173,10 +192,10 @@ class Model:
             :meth:`validate` would return on them *before* the model saw them.
 
         Raises:
-            Exception: If called before a successful :meth:`fit`.
+            RuntimeError: If called before a successful :meth:`fit`.
         """
         if not self.has_been_fitted or self._X is None:
-            raise Exception("refit() requires a prior fit(); call fit() first.")
+            raise RuntimeError("refit() requires a prior fit(); call fit() first.")
         out_of_sample = self.predict(X, var=True)  # the OLD model scores the unseen points
         self._record(X, y, out_of_sample)  # keep the full prediction for history()
         score = self._score(at_least2d(y, expand="c"), out_of_sample, metrics)
@@ -214,10 +233,10 @@ class Model:
             ``score["nlpd"]``.
 
         Raises:
-            Exception: If called before a successful :meth:`fit`.
+            RuntimeError: If called before a successful :meth:`fit`.
         """
         if not self.has_been_fitted:
-            raise Exception("validate() requires a fitted model; call fit() first.")
+            raise RuntimeError("validate() requires a fitted model; call fit() first.")
         pred = self.predict(X, var=True)
         return self._score(at_least2d(y, expand="c"), pred, metrics)
 
@@ -249,13 +268,14 @@ class Model:
             The fitted variance scale ``s`` for this held-out set (relative to the current predictions).
 
         Raises:
-            Exception: If called before a fit, or if the model has no predictive variance to scale.
+            RuntimeError: If called before a fit.
+            ValueError: If the model has no predictive variance to scale.
         """
         if not self.has_been_fitted:
-            raise Exception("calibrate() requires a fitted model; call fit() first.")
+            raise RuntimeError("calibrate() requires a fitted model; call fit() first.")
         pred = self.predict(X, var=True)
         if pred.var is None:
-            raise Exception("model has no predictive variance to calibrate.")
+            raise ValueError("model has no predictive variance to calibrate.")
         resid2 = np.square(at_least2d(y, expand="c") - pred.y)
         s = float(np.mean(resid2 / np.maximum(pred.var, 1e-300)))
         if apply:
@@ -321,18 +341,22 @@ class Model:
             ``Plog``) has no constant scale and raises when uncertainty/gradients are requested.
         """
         q = self._y.shape[1] if self._y is not None else 1
-        # row count from the promoted input -- a 1-D point of shape (d,) is one row, not d rows,
-        # so both early-return shapes below stay (m, q) regardless of how X was passed
-        m = len(at_least2d(X, expand="r"))
+        # promote first: a 1-D point of shape (d,) is ONE row, not d rows -- and active_dims must
+        # slice columns of a 2-D array (slicing a 1-D point would pick coordinates as rows).
+        X = at_least2d(X, expand="r")
+        m = len(X)
 
         if not self.success:
-            # this is a predict() call, so honor the prediction toggle (not the fitting one)
+            # this is a predict() call, so honor the prediction toggle (not the fitting one).
+            # success is None -> fit() was never called; False -> the fit itself failed.
             if self.raise_exception_while_prediction:
-                raise Exception("There was an error while fitting the model.")
+                if self.success is None:
+                    raise RuntimeError("model has not been fitted; call fit() first.")
+                raise RuntimeError("There was an error while fitting the model.") from self.exception
             return Prediction(y=np.full((m, q), np.nan))
 
         Xq = X[:, self.active_dims] if self.active_dims is not None else X
-        Xq = self.norm_X.forward(at_least2d(Xq, expand="r"))
+        Xq = self.norm_X.forward(Xq)
 
         try:
             pred = self._predict(Xq, var=var, grad=grad)
@@ -340,7 +364,8 @@ class Model:
         except Exception as e:
             if self.raise_exception_while_prediction:
                 raise e
-            pred = Prediction(y=np.full((m, q), np.inf))
+            # the same NaN sentinel as the failed-fit path above -- one failure convention
+            pred = Prediction(y=np.full((m, q), np.nan))
 
         return pred
 
@@ -355,6 +380,3 @@ class Model:
 
     def _predict(self, X, var=False, grad=False):
         raise NotImplementedError
-
-    def _optimize(self, **kwargs):
-        pass

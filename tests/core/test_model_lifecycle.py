@@ -1,6 +1,7 @@
 """Tests for the Model base lifecycle: preprocessing, normalization, postprocess scaling."""
 
 import numpy as np
+import pytest
 
 from pysurrogate.core import Model, Prediction, Standardization
 
@@ -52,3 +53,39 @@ def test_grad_unnormalized_through_standardization():
     std = LinearBackend(norm_y=Standardization()).fit(X, y).predict(X[:3], grad=True)
     assert np.allclose(raw.grad, std.grad, atol=1e-6)
     assert np.allclose(raw.y, std.y, atol=1e-6)
+
+
+def test_unknown_constructor_kwarg_raises():
+    # a typo'd keyword (e.g. norm_x= instead of norm_X=) was silently swallowed, hiding a
+    # misconfigured model; unknown kwargs no subclass consumed must now raise.
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        LinearBackend(norm_x=Standardization())  # note the lowercase typo
+
+
+def test_predict_before_fit_and_after_failed_fit_have_distinct_messages():
+    # never fitted -> "has not been fitted"; a fit that ran but failed -> "error while fitting".
+    never = LinearBackend()
+    with pytest.raises(RuntimeError, match="has not been fitted"):
+        never.predict(np.array([[0.1, 0.2]]))
+
+    class _Fails(Model):
+        def _fit(self, X, y, **kwargs):
+            raise RuntimeError("boom")
+
+        def _predict(self, X, var=False, grad=False):
+            return Prediction(y=np.zeros((len(X), 1)))
+
+    failed = _Fails(raise_exception_while_fitting=False)
+    failed.fit(*_data())
+    assert not failed.has_been_fitted  # a failed fit does not count as fitted
+    with pytest.raises(RuntimeError, match="error while fitting"):
+        failed.predict(np.array([[0.1, 0.2]]))
+
+
+def test_predict_promotes_1d_point_before_slicing_active_dims():
+    # regression: a 1-D query with active_dims must be promoted to one row FIRST, then have its
+    # columns sliced -- slicing a 1-D point would pick coordinates as rows and crash / mis-shape.
+    X, y = _data()
+    model = LinearBackend(active_dims=[0]).fit(X, y)
+    pred = model.predict(np.array([0.3, 0.7]))  # a single 1-D point of width 2
+    assert pred.y.shape == (1, 1) and np.all(np.isfinite(pred.y))

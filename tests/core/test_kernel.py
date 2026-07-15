@@ -82,6 +82,15 @@ def test_generalized_exponential_n_theta_counts_the_power():
     assert GeneralizedExponential(ard=True).n_theta(5) == 6  # five length-scales + power
 
 
+def test_generalized_exponential_split_rejects_wrong_length_theta():
+    # theta must be (length_scale, power) [len 2] or (length_scales..., power) [len d+1]; anything
+    # else is a caller error and must raise ValueError (was a bare Exception; len() also failed on 0-d).
+    ge = GeneralizedExponential()
+    D = np.zeros((4, 3))  # d = 3, so a valid theta is length 2 or length 4
+    with pytest.raises(ValueError, match="length 2 or d\\+1"):
+        ge(D, np.array([1.0, 1.0, 1.0]))  # length 3: neither 2 nor d+1
+
+
 def test_correlation_is_kernel_alias():
     # the DACE layer's historical name must remain the same class object
     assert Correlation is Kernel

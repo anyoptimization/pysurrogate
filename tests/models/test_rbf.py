@@ -40,6 +40,29 @@ def test_rbf_interpolates_training_points(kernel):
     assert np.allclose(model.predict(X).y, y, atol=1e-6)
 
 
+def test_tune_sigma_skips_grid_for_sigma_free_kernel():
+    # tps depends on the radius only and ignores sigma, so tune_sigma must NOT run the LOOCV grid
+    # (it would refit the identical model 30 times) -- the fitted sigma stays the constructor value.
+    rng = np.random.RandomState(0)
+    X = rng.random((25, 2))
+    y = np.sin(3 * X[:, [0]]) + X[:, [1]] ** 2
+    m = RBF(kernel="tps", tune_sigma=True).fit(X, y)
+    assert m.model["sigma"] == 1.0
+    # a sigma-using kernel (gaussian) does search the grid and lands on a different sigma
+    g = RBF(kernel="gaussian", tune_sigma=True).fit(X, y)
+    assert g.model["sigma"] != 1.0
+
+
+def test_optimize_is_a_backcompat_alias_for_tune_sigma():
+    # `optimize=` was the former constructor name for `tune_sigma=`; it must still drive the search.
+    rng = np.random.RandomState(0)
+    X = rng.random((25, 2))
+    y = np.sin(3 * X[:, [0]]) + X[:, [1]] ** 2
+    assert RBF(kernel="gaussian", optimize=True).tune_sigma is True
+    g = RBF(kernel="gaussian", optimize=True).fit(X, y)
+    assert g.model["sigma"] != 1.0
+
+
 def test_rbf_gaussian_is_no_longer_the_quartic_bug():
     # the old kernel_gaussian applied exp(-sigma * r**2) to the ALREADY-squared distance r, giving a
     # quartic exp(-sigma * ||.||**4). Rebuilt on the covariance Gaussian, a single center evaluates as

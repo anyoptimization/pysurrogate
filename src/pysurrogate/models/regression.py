@@ -1,5 +1,7 @@
 """Polynomial regression surrogate model with an analytic gradient."""
 
+import math
+
 import numpy as np
 from sklearn.linear_model import LinearRegression  # type: ignore[import-untyped]
 from sklearn.pipeline import make_pipeline  # type: ignore[import-untyped]
@@ -18,7 +20,12 @@ class PolynomialRegression(Model):
         self.fail_if_not_enough_points = fail_if_not_enough_points
 
     def _fit(self, X, y, **kwargs):
-        n_min_points = PolynomialFeatures(self.degree).fit_transform(X).shape[1]
+        if y.shape[1] != 1:
+            raise ValueError(
+                f"PolynomialRegression supports a single output, got {y.shape[1]}; fit one model per output."
+            )
+        # number of polynomial features (bias included) in closed form -- no throwaway transform
+        n_min_points = math.comb(X.shape[1] + self.degree, self.degree)
 
         if self.fail_if_not_enough_points and len(X) < n_min_points:
             raise ValueError(

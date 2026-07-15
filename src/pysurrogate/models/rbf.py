@@ -9,6 +9,7 @@ from pysurrogate.core.kernel import (
     Multiquadric,
     ThinPlateSpline,
     calc_kernel_matrix,
+    pairwise_diffs,
 )
 from pysurrogate.core.model import Model
 from pysurrogate.core.prediction import Prediction
@@ -30,6 +31,10 @@ _KERNELS = {
     "mq": Multiquadric(),
     "tps": ThinPlateSpline(),
 }
+
+# the pure-power bases depend on the radius only -- sigma is ignored, so a sigma grid search
+# would fit the identical model 30 times over; these skip straight to the single fixed fit.
+_SIGMA_FREE = frozenset({"linear", "cubic", "tps"})
 
 # The polynomial tail is the shared core regression basis -- one implementation of "build a
 # polynomial design matrix P(X) (+ gradient)" for the whole framework. "quadratic" and
@@ -56,30 +61,47 @@ class RBF(Model):
     The kernel is one of the shared :mod:`pysurrogate.core.kernel` bases (``linear``/``cubic`` radial
     powers, ``gaussian`` covariance, ``mq`` multiquadric, ``tps`` thin-plate spline), evaluated on the
     coordinate differences between points. ``sigma`` is the kernel's shape parameter (the Gaussian
-    length-scale, the multiquadric offset); the pure-power bases ignore it. With ``optimize=True``
+    length-scale, the multiquadric offset); the pure-power bases ignore it. With ``tune_sigma=True``
     ``sigma`` is selected by minimizing leave-one-out cross-validation error over a small grid.
     """
 
     def __init__(
-        self, kernel="tps", tail="linear", sigma=1.0, rho=1e-6, normalized=False, optimize=False, **kwargs
+        self,
+        kernel="tps",
+        tail="linear",
+        sigma=1.0,
+        rho=1e-6,
+        normalized=False,
+        tune_sigma=False,
+        optimize=None,
+        **kwargs,
     ) -> None:
-        super().__init__(eliminate_duplicates=True, eliminate_duplicates_eps=1e-8, **kwargs)
+        # default duplicate elimination on, but via setdefault so a user override (e.g.
+        # eliminate_duplicates=False) does not collide with an explicit positional pass-through.
+        kwargs.setdefault("eliminate_duplicates", True)
+        kwargs.setdefault("eliminate_duplicates_eps", 1e-8)
+        super().__init__(**kwargs)
         self.tail = tail
         self.rho = rho
         self.sigma = sigma
         self.normalized = normalized
-        self.optimize = optimize
+        # whether the fit searches the sigma grid. `tune_sigma` is the current name; `optimize=` is
+        # its former spelling, kept as a back-compat alias so it no longer visually collides with the
+        # separate fit-time `optimize=` lever (which switches the search off per-fit).
+        self.tune_sigma = tune_sigma if optimize is None else optimize
 
         if kernel not in _KERNELS:
             raise ValueError(f"Unknown kernel function: {kernel!r}. Choose one of {sorted(_KERNELS)}.")
+        self.kernel_name = kernel
         self.kernel = _KERNELS[kernel]
 
     def _fit(self, X, y, optimize=True, **kwargs):
         rho, tail, kernel, sigma, normalized = self.rho, self.tail, self.kernel, self.sigma, self.normalized
 
-        # tune sigma only when the model is configured to AND the fit-time flag allows it, so
-        # optimize=False forces the cheap fixed-sigma fit for model-selection screening (like Kriging)
-        if self.optimize and optimize:
+        # tune sigma only when the model is configured to, the fit-time flag allows it, AND the
+        # kernel actually uses sigma -- the pure-power bases ignore it, so a grid would re-fit the
+        # identical model 30 times (optimize=False also forces the cheap fixed-sigma screening fit).
+        if self.tune_sigma and optimize and self.kernel_name not in _SIGMA_FREE:
             sigmas = np.linspace(0.0001, 20, 30)
             models = [rbf_fit(X, y, kernel, sigma=s, tail=tail, rho=rho, normalized=normalized) for s in sigmas]
             f = np.array([model["loocv"] for model in models])
@@ -162,10 +184,19 @@ def rbf_predict(model, X):
 
 
 def svd_inv(A):
-    """Pseudo-inverse of ``A`` via SVD, returning ``(A_inv, condition_number)``."""
+    """Pseudo-inverse of ``A`` via SVD, returning ``(A_inv, condition_number)``.
+
+    Singular values below a relative tolerance are truncated (their reciprocal set to 0), so a
+    near-singular system yields a stable least-norm solution instead of amplifying round-off through
+    ``1/S``. A well-conditioned system keeps every singular value, so the result is unchanged there.
+    The reported ``cond`` is the full untruncated ratio (the sigma-grid uses it to reject fits).
+    """
     U, S, V = np.linalg.svd(A)
-    A_inv = V.T @ np.diag(1 / S) @ U.T
     cond = np.abs(np.max(S)) / np.abs(np.min(S))
+    # numpy's default pinv cutoff: keep S_i whose ratio to S_max exceeds machine-eps * max(shape).
+    tol = S.max() * max(A.shape) * np.finfo(float).eps
+    S_inv = np.where(S > tol, 1.0 / S, 0.0)
+    A_inv = V.T @ np.diag(S_inv) @ U.T
     return A_inv, cond
 
 
@@ -196,7 +227,7 @@ def rbf_grad(model, X):
 
     # componentwise differences in the calc_kernel_matrix layout, so kernel.grad gives d phi / d x
     # for every (query, center) pair; reshape to (m, n, d) and contract with the center weights.
-    D = np.repeat(X, n, axis=0) - np.tile(Xc, (m, 1))  # (m*n, d)
+    D = pairwise_diffs(X, Xc)  # (m*n, d)
     G = kernel.grad(D, sigma).reshape(m, n, d)
 
     coef = model["coef"][:, 0]

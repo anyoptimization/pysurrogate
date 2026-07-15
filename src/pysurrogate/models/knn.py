@@ -31,7 +31,10 @@ class KNN(Model):
     def _predict(self, X, var=False, grad=False):
         D = calc_dist(X, self.X)
 
-        idx = D.argsort(axis=1)[:, : self.n_nearest]
+        # only the k-nearest *set* matters (the weights are order-free), so a partial partition
+        # beats a full sort; fall back to all columns when the design is smaller than k.
+        k = min(self.n_nearest, D.shape[1])
+        idx = np.argpartition(D, k - 1, axis=1)[:, :k] if k < D.shape[1] else np.argsort(D, axis=1)
 
         d = np.take_along_axis(D, idx, axis=1) ** self.p
         d[d == 0] = 1e-64

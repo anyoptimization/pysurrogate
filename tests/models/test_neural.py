@@ -115,14 +115,14 @@ def test_early_stopping_is_on_by_default_and_holds_out_a_validation_set():
     X, y = _data(120)
     model = DeepKernelGP().fit(X, y)
     # sklearn only records a validation curve when early stopping held out a validation split
-    assert model.nn_.validation_scores_ is not None and len(model.nn_.validation_scores_) > 0
-    assert model.nn_.n_iter_ <= model.max_iter
+    assert model.nn.validation_scores_ is not None and len(model.nn.validation_scores_) > 0
+    assert model.nn.n_iter_ <= model.max_iter
 
 
 def test_early_stopping_can_be_disabled():
     X, y = _data(120)
     model = DeepKernelGP(early_stopping=False).fit(X, y)
-    assert model.nn_.validation_scores_ is None  # no held-out validation when disabled
+    assert model.nn.validation_scores_ is None  # no held-out validation when disabled
 
 
 def test_early_stopping_curbs_overfitting_on_a_noisy_small_design():
@@ -153,21 +153,21 @@ def test_nugget_is_learned_by_maximum_likelihood():
     f = np.sin(3 * X[:, [0]]) + X[:, [1]] ** 2
     clean = DeepKernelGP().fit(X, f)
     noisy = DeepKernelGP().fit(X, f + 0.3 * rng.standard_normal((80, 1)))
-    assert clean.gp.model["noise"] < 1e-4  # near the floor -> near-interpolation
-    assert noisy.gp.model["noise"] > 10 * clean.gp.model["noise"]  # learned to smooth the noise
+    assert clean.model.model["noise"] < 1e-4  # near the floor -> near-interpolation
+    assert noisy.model.model["noise"] > 10 * clean.model.model["noise"]  # learned to smooth the noise
 
 
 def test_forwards_the_selection_strategy_to_the_gp_head():
     X, y = _data(50)
     # a MaximumLikelihood selection with no noise_bounds keeps the nugget fixed at `noise`
     fixed = DeepKernelGP(noise=5e-3, selection=MaximumLikelihood()).fit(X, y)
-    assert fixed.gp.model["noise"] == 5e-3
+    assert fixed.model.model["noise"] == 5e-3
     # optimizer=None on the selection freezes the length-scale at its start (the Dace meaning)
     frozen = DeepKernelGP(theta=0.7, selection=MaximumLikelihood(optimizer=None)).fit(X, y)
-    assert np.allclose(frozen.gp.model["theta"], 0.7)
+    assert np.allclose(frozen.model.model["theta"], 0.7)
     # a MAP selection pulls the length-scale toward a smoother fit vs pure MLE
-    mle = DeepKernelGP(selection=MaximumLikelihood(), random_state=0).fit(X, y).gp.model["theta"]
-    mapped = DeepKernelGP(selection=MAP(mean=1.0, lam=0.5), random_state=0).fit(X, y).gp.model["theta"]
+    mle = DeepKernelGP(selection=MaximumLikelihood(), random_state=0).fit(X, y).model.model["theta"]
+    mapped = DeepKernelGP(selection=MAP(mean=1.0, lam=0.5), random_state=0).fit(X, y).model.model["theta"]
     assert float(np.atleast_1d(mapped)[0]) > float(np.atleast_1d(mle)[0])
 
 
@@ -200,5 +200,5 @@ def test_falls_back_gracefully_when_too_small_to_validate():
     # a tiny design cannot spare a validation point; fit must not crash (early stopping auto-skips)
     X, y = _data(6)
     model = DeepKernelGP(early_stopping=True, validation_fraction=0.1).fit(X, y)
-    assert model.nn_.validation_scores_ is None  # skipped
+    assert model.nn.validation_scores_ is None  # skipped
     assert np.all(np.isfinite(model.predict(X).y))

@@ -4,15 +4,9 @@ import numpy as np
 from scipy.spatial.distance import cdist  # type: ignore[import-untyped]
 
 from pysurrogate.core.kernel import Mahalanobis
-from pysurrogate.core.model import Model
+from pysurrogate.core.transformation import standardize
 from pysurrogate.dace import Dace, LinearRegression
-
-
-def _standardize(X):
-    """Z-score the columns of ``X`` (``ddof=1``), matching the Dace engine; constant columns -> /1."""
-    m = np.mean(X, axis=0)
-    s = np.std(X, axis=0, ddof=1)
-    return (X - m) / np.where(s > 0, s, 1.0)
+from pysurrogate.models._dace_backed import DaceBackedModel
 
 
 def _local_gradients(Xs, ys, k):
@@ -61,7 +55,7 @@ def active_subspace(X, y, n_components=None, k=None):
     n, d = X.shape
     k = int(np.clip(int(k or min(2 * (d + 1), n - 1)), min(d + 1, n - 1), max(1, n - 1)))
 
-    Xs = _standardize(X)
+    Xs, _, _ = standardize(X)
     sy = np.std(y)
     ys = (y - np.mean(y)) / (sy if sy > 0 else 1.0)
 
@@ -77,7 +71,7 @@ def active_subspace(X, y, n_components=None, k=None):
     return V[:, :h], w
 
 
-class RotatedKriging(Model):
+class RotatedKriging(DaceBackedModel):
     """Kriging over a Mahalanobis metric whose rotation is *learned from the data*.
 
     Ordinary ARD Kriging can only stretch the coordinate axes -- it cannot represent a function whose
@@ -102,6 +96,8 @@ class RotatedKriging(Model):
         theta_prior: Optional ``(mean, lam)`` MAP prior on the length-scales (see ``Dace``).
     """
 
+    default_regr = LinearRegression
+
     def __init__(
         self,
         regr=None,
@@ -113,24 +109,17 @@ class RotatedKriging(Model):
         selection=None,
         **kwargs,
     ) -> None:
-        super().__init__(eliminate_duplicates=True, **kwargs)
-        self.regr = regr if regr is not None else LinearRegression()
+        super().__init__(regr=regr, selection=selection, **kwargs)
         self.n_components = n_components
         self.k = k
         self.theta = theta
         self.theta_bounds = theta_bounds
         self.theta_prior = theta_prior
-        self.selection = selection  # optional hyperparameter-selection strategy, forwarded to Dace
 
     def _engine(self, X, y):
         """Build the ``Dace`` engine with a data-estimated Mahalanobis rotation and a length-``h`` theta."""
         A, _ = active_subspace(X, y, self.n_components, self.k)
-        h = A.shape[1]
-        theta = np.full(h, self.theta)
-        theta_bounds = self.theta_bounds
-        if theta_bounds is not None:
-            lo, hi = theta_bounds
-            theta_bounds = (np.full(h, lo), np.full(h, hi))
+        theta, theta_bounds = self._broadcast_theta(self.theta, self.theta_bounds, A.shape[1])
         return Dace(
             regr=self.regr,
             corr=Mahalanobis(A),
@@ -143,11 +132,3 @@ class RotatedKriging(Model):
     def _fit(self, X, y, optimize=True, **kwargs):
         self.model = self._engine(X, y)
         self.model.fit(X, y, optimize=optimize)
-
-    def _refit(self, X, y, optimize=True):
-        # incremental warm-started re-fit at the fixed rotation; the generic Model.refit handles the
-        # out-of-sample scoring and record. optimize warm-starts / freezes the length-scale search.
-        self.model.refit(X, y, optimize=optimize)
-
-    def _predict(self, X, var=False, grad=False):
-        return self.model.predict(X, var=var, grad=grad)

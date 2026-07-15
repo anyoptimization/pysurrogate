@@ -60,19 +60,12 @@ class QuadraticRegression(Regression):
         return [(a, b) for a in range(d) for b in range(a, d)]
 
     def __call__(self, X):
-        m, n, nn = X.shape[0], X.shape[1], int((X.shape[1] + 1) * (X.shape[1]) / 2)
-
-        M = np.zeros((m, nn))
-
-        j = 0
-        q = n
-
-        for k in range(n):
-            M[:, j + np.arange(q)] = X[:, [k]] * X[:, np.arange(k, n)]
-            j += q
-            q -= 1
-
-        return np.column_stack([np.ones((X.shape[0], 1)), X, M])
+        # the pairwise block is one column X_a * X_b per (a, b), a <= b -- the same column order
+        # _pairs / grad use, so intercept + linear + quadratic line up. Behavior-identical to the
+        # old index-arithmetic loop, just read off the shared pair list.
+        pairs = self._pairs(X.shape[1])
+        quad = np.column_stack([X[:, a] * X[:, b] for a, b in pairs]) if pairs else np.zeros((X.shape[0], 0))
+        return np.column_stack([np.ones((X.shape[0], 1)), X, quad])
 
     def grad(self, X):
         m, d = X.shape

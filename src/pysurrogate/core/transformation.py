@@ -100,6 +100,8 @@ class ZeroToOneNormalization(Transformation):
     """Min-max normalization to ``[0, 1]``, with bounds estimated from the data by default."""
 
     def __init__(self, xl=None, xu=None, estimate_bounds=True) -> None:
+        if not estimate_bounds and (xl is None or xu is None):
+            raise ValueError("ZeroToOneNormalization(estimate_bounds=False) requires explicit xl and xu bounds.")
         self._xl0, self._xu0 = xl, xu  # as-constructed bounds, restored by reset()
         self.xl = xl
         self.xu = xu
@@ -108,23 +110,45 @@ class ZeroToOneNormalization(Transformation):
     def reset(self):
         self.xl, self.xu = self._xl0, self._xu0
 
+    def _range(self):
+        # a constant dimension has range 0; map it to scale 1 (the same convention as
+        # Standardization) so forward/backward/scale stay finite instead of producing inf/NaN.
+        r = np.asarray(self.xu) - np.asarray(self.xl)
+        return np.where(r == 0.0, 1.0, r)
+
     def forward(self, X):
         if self.estimate_bounds:
             if self.xl is None:
                 self.xl = np.min(X, axis=0)
             if self.xu is None:
                 self.xu = np.max(X, axis=0)
-
-        denom = self.xu - self.xl
-        # avoid divide-by-zero on a constant dimension
-        denom = denom + (denom == 0) * 1e-32
-        return (X - self.xl) / denom
+        return (X - self.xl) / self._range()
 
     def backward(self, X):
-        return X * (self.xu - self.xl) + self.xl
+        return X * self._range() + self.xl
 
     def scale(self):
-        return self.xu - self.xl
+        return self._range()
+
+
+def standardize(X):
+    """Z-score the columns of ``X`` (``ddof=1``), the Dace-engine convention; constant columns -> /1.
+
+    The one shared implementation of the zero-guarded sample standardization the engine-adjacent
+    code needs (PLS weights, active-subspace estimation) so they operate in the exact space the
+    Dace engine fits in.
+
+    Args:
+        X: Data, shape ``(n, d)``.
+
+    Returns:
+        ``(norm, mean, std)`` -- the standardized data and the per-column statistics used, with
+        zero-variance columns mapped to ``std = 1`` so they center to 0 instead of dividing by zero.
+    """
+    m = np.mean(X, axis=0)
+    s = np.std(X, axis=0, ddof=1)
+    s = np.where(s == 0.0, 1.0, s)
+    return (X - m) / s, m, s
 
 
 class Plog(Transformation):

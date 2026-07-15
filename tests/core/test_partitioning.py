@@ -43,6 +43,16 @@ def test_seed_is_reproducible():
     assert all(np.array_equal(x.test, y.test) for x, y in zip(a, b))
 
 
+def test_validation_slice_leaves_at_least_one_training_row():
+    # regression: a valid_frac near 1 (or a tiny fold) would carve the whole training pool into
+    # validation, leaving train empty. n_valid is clamped to len(train) - 1 so training survives.
+    splits = CrossvalidationPartitioning(k_folds=3, seed=0, valid_frac=0.99).do(12)
+    for s in splits:
+        assert s.valid is not None
+        assert len(s.train) >= 1  # at least one training row remains
+        assert set(s.train.tolist()).isdisjoint(s.valid.tolist())
+
+
 def test_does_not_perturb_global_rng_state():
     import random as _random
 

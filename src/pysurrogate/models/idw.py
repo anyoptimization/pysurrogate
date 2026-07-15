@@ -16,7 +16,10 @@ class InverseDistanceWeighting(Model):
         self.eps = eps
 
     def _fit(self, X, y, **kwargs):
-        pass
+        if y.shape[1] != 1:
+            raise ValueError(
+                f"InverseDistanceWeighting supports a single output, got {y.shape[1]}; fit one model per output."
+            )
 
     def _predict(self, X, var=False, grad=False):
         _y = self.y[:, 0]
@@ -27,13 +30,9 @@ class InverseDistanceWeighting(Model):
         w = 1 / D**self.p
 
         # at an exact data hit, pin the surface to that target (weight 1 there, 0 elsewhere)
-        hit = np.zeros(len(X), dtype=bool)
-        for k, d in enumerate(D):
-            is_zero = d <= self.eps
-            if is_zero.sum() > 0:
-                hit[k] = True
-                w[k, ~is_zero] = 0
-                w[k, is_zero] = 1
+        is_zero = D <= self.eps  # (m, n)
+        hit = is_zero.any(axis=1)
+        w[hit] = is_zero[hit].astype(float)
 
         w = w / w.sum(axis=1)[:, None]
         y = (_y * w).sum(axis=1)

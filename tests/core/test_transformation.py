@@ -1,6 +1,7 @@
 """Regression tests for transformation edge cases (constant dims, integer inputs)."""
 
 import numpy as np
+import pytest
 
 from pysurrogate.core.transformation import Plog, Standardization, ZeroToOneNormalization
 
@@ -58,6 +59,24 @@ def test_standardization_constant_dimension_is_finite():
     # the constant column centers to all-zeros and round-trips back to its constant
     np.testing.assert_allclose(Z[:, 1], 0.0)
     np.testing.assert_allclose(t.backward(Z), X)
+
+
+def test_zero_to_one_constant_dimension_is_finite():
+    # regression: a constant column has range 0; dividing by it produced inf/NaN. It must map to
+    # scale 1 (like Standardization) so forward/backward/scale stay finite and round-trip.
+    X = np.column_stack([np.linspace(0, 1, 10), np.full(10, 3.0)])
+    t = ZeroToOneNormalization()
+    Z = t.forward(X)
+    assert np.all(np.isfinite(Z))
+    assert np.all(np.isfinite(t.scale()))
+    np.testing.assert_allclose(t.backward(Z), X)
+
+
+def test_zero_to_one_estimate_bounds_false_requires_explicit_bounds():
+    # estimate_bounds=False with no xl/xu left them None -> a TypeError deep in forward(); validate
+    # up front with a clear message instead.
+    with pytest.raises(ValueError, match="requires explicit xl and xu"):
+        ZeroToOneNormalization(estimate_bounds=False)
 
 
 def test_plog_does_not_truncate_integer_input():
