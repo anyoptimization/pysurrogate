@@ -2,9 +2,10 @@
 
 import numpy as np
 
+from pysurrogate.core.kernel import pairwise_diffs
 from pysurrogate.core.optimizer import Evaluation, Problem
 from pysurrogate.core.parameter import Log10, Parameter, ParameterSpace
-from pysurrogate.dace.fit import batch_obj_grad, fit
+from pysurrogate.dace.fit import batch_obj_grad
 
 _LN10 = np.log(10.0)
 _FLOOR = 1e-12  # keep log10 of a zero/near-zero bound finite
@@ -64,8 +65,7 @@ class DaceProblem(Problem):
         # them across every objective/gradient evaluation of the search (instead of rebuilding the
         # (n*n, d) matrix per call). Passing this one array also lets a reducing kernel (KPLS) cache
         # its per-fit distance projection, keyed on this exact object.
-        n = X.shape[0]
-        self._D = np.repeat(X, n, axis=0) - np.tile(X, (n, 1))
+        self._D = pairwise_diffs(X, X)
 
         # The search layout is the kernel's own declaration: the concatenated length-scale / shape
         # coordinates it exposes via parameters(d), sized from the data dimensionality. The user's
@@ -84,9 +84,21 @@ class DaceProblem(Problem):
         # left after the kernel's fixed shape coordinates (e.g. GeneralizedExponential's exponent).
         kparams = kernel.parameters(X.shape[1])
         fixed = sum(kp.size for kp in kparams if not kp.fill)
+        # a fill (length-scale) block absorbs whatever is left after the kernel's fixed shape
+        # coordinates; if the supplied bounds do not even cover the fixed coordinates plus one
+        # length-scale, the fill block would get size <= 0 and the bounds would be misassigned to
+        # the fixed shape coordinate (e.g. GeneralizedExponential's `power`). Fail loudly instead.
+        if any(kp.fill for kp in kparams) and p_total - fixed < 1:
+            raise ValueError(
+                f"theta_bounds supplies {p_total} coordinate(s) but kernel {type(kernel).__name__} "
+                f"needs at least {fixed + 1}: pass bounds for [length_scales..., shape_params...]."
+            )
         params, i = [], 0
+        ls_lo, ls_hi = 0, p_total  # index range of the length-scale (fill) block within the theta vector
         for kp in kparams:
             size = (p_total - fixed) if kp.fill else kp.size
+            if kp.fill:
+                ls_lo, ls_hi = i, i + size
             params.append(
                 Parameter(
                     kp.name,
@@ -100,6 +112,7 @@ class DaceProblem(Problem):
         if i != p_total:
             raise ValueError(f"theta_bounds has {p_total} coordinates but the kernel declares {i}.")
         self.p = p_total
+        self._ls_lo, self._ls_hi = ls_lo, ls_hi
         self._theta_names = [p.name for p in params]
 
         # noise_bounds set -> learn the nugget as a trailing coordinate; else fixed (None -> 0).
@@ -114,6 +127,13 @@ class DaceProblem(Problem):
             self.noise = 0.0 if noise is None else float(noise)
 
         self.space = ParameterSpace(params)
+
+        # screen() and __call__ decode coordinates with a hard-coded ``10**x`` and apply the log10
+        # chain rule (``* value * ln10``) directly, so every coordinate must be Log10-encoded. Assert
+        # the assumption rather than silently miscomputing objective/gradient under another encoding.
+        assert all(isinstance(prm.encoding, Log10) for prm in params), (
+            "DaceProblem assumes every parameter is Log10-encoded (screen/__call__ hard-code 10**x)."
+        )
 
     @property
     def bounds(self):
@@ -148,11 +168,6 @@ class DaceProblem(Problem):
         noise = float(values["noise"][0]) if self.learn_noise else self.noise
         return theta, float(noise)
 
-    def fit(self, x):
-        """Commit a full :func:`~pysurrogate.dace.fit.fit` at the parameters encoded by ``x``."""
-        theta, noise = self.decode(x)
-        return fit(self.X, self.Y, self.regr, self.kernel, theta, noise=noise)
-
     def _prior_penalty(self, Z):
         """MAP penalty ``lam * sum((z - mean)**2)`` per candidate over the log10 length-scales ``Z``.
 
@@ -176,8 +191,9 @@ class DaceProblem(Problem):
             self.X, self.Y, self.regr, self.kernel, thetas, noise=noise, with_grad=False, D=self._D
         )
         # add the MAP penalty so the screen ranks by the SAME objective the gradient path polishes
-        # (infeasible candidates keep obj=+inf: inf + finite penalty = inf).
-        return obj + self._prior_penalty(X[:, : self.p])
+        # (infeasible candidates keep obj=+inf: inf + finite penalty = inf). The prior regularizes
+        # only the length-scale (fill) slice, never the fixed shape coordinates (e.g. `power`).
+        return obj + self._prior_penalty(X[:, self._ls_lo : self._ls_hi])
 
     def __call__(self, X):
         X = np.atleast_2d(np.asarray(X, float))
@@ -199,11 +215,12 @@ class DaceProblem(Problem):
 
         # MAP prior on the encoded length-scales: add lam*sum((z-mean)^2) to the objective and its
         # gradient 2*lam*(z-mean) directly in log10 space (the search coordinate). Applied to the
-        # theta coordinates only, and only on feasible rows (infeasible keep obj=+inf, grad=0).
+        # length-scale (fill) coordinates only -- never the fixed shape coordinates (e.g. `power`) --
+        # and only on feasible rows (infeasible keep obj=+inf, grad=0).
         if self._prior is not None:
-            Z = X[:, : self.p]
+            Z = X[:, self._ls_lo : self._ls_hi]
             mean, lam = self._prior
             obj = obj + self._prior_penalty(Z)
-            grad[:, : self.p] += feasible[:, None] * (2.0 * lam * (Z - mean))
+            grad[:, self._ls_lo : self._ls_hi] += feasible[:, None] * (2.0 * lam * (Z - mean))
 
         return Evaluation(f=obj, feasible=feasible, grad=grad, info=None)

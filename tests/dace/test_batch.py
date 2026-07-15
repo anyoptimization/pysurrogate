@@ -1,6 +1,7 @@
 """Tests for the batched theta primitive (objective + analytic gradient + feasibility)."""
 
 import numpy as np
+import pytest
 
 from pysurrogate.dace.corr import Gaussian, Matern
 from pysurrogate.dace.fit import _cholesky_batch, batch_obj_grad, fit
@@ -8,6 +9,14 @@ from pysurrogate.dace.regr import ConstantRegression
 
 GAUSS = Gaussian()
 CONSTANT = ConstantRegression()
+
+
+def test_noise_grad_requires_with_grad():
+    # df/d(noise) needs the gradient block; requesting it with with_grad=False used to silently
+    # return an all-zero dnoise. It must now raise rather than mislead the caller.
+    nX, nY = _standardized(0, 2)
+    with pytest.raises(ValueError, match="noise_grad requires with_grad"):
+        batch_obj_grad(nX, nY, CONSTANT, GAUSS, np.array([[1.0, 1.0]]), noise=0.1, with_grad=False, noise_grad=True)
 
 
 def _standardized(seed, d, n=18, q=1):

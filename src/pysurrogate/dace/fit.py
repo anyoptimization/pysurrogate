@@ -3,7 +3,12 @@
 import numpy as np
 from numpy.linalg import LinAlgError
 
+from pysurrogate.core.kernel import pairwise_diffs
 from pysurrogate.dace.corr import calc_kernel_matrix, calc_kernel_tensor
+
+# machine epsilon for double precision -- the invisible numerical floor added to the
+# correlation-matrix diagonal (scaled by sample size), not a modeling choice.
+_EPS = np.finfo(float).eps
 
 
 class DaceFitError(Exception):
@@ -44,7 +49,7 @@ def fit(X, Y, regr, kernel, theta, noise=0.0):
 
     # baseline float-level jitter against near-singularity, always added -- the invisible
     # numerical floor (machine epsilon scaled by sample size), not a modeling choice
-    base = (10 + n_sample) * 2.220446049250313e-16
+    base = (10 + n_sample) * _EPS
     R0 = calc_kernel_matrix(X, X, kernel, theta)
 
     # do the cholesky decomposition. The diagonal carries the DELIBERATE observation
@@ -85,19 +90,16 @@ def fit(X, Y, regr, kernel, theta, noise=0.0):
     if type(theta) is not np.ndarray:
         theta = np.array([theta])
 
+    # "obj" and "f" are the same value under two names -- "obj" is the DACE-likelihood name
+    # (read by the batch/multioutput tests), "f" the generic Problem objective name (read by
+    # the problem-equivalence test); both are kept intentionally.
     return {
-        "kernel": kernel,
-        "regr": regr,
         "theta": theta,
         "R": R,
         "C": C,
-        "F": F,
         "Ft": Ft,
-        "Q": Q,
         "G": G,
-        "Yt": Yt,
         "beta": beta,
-        "rho": rho,
         "_sigma2": sigma2,
         "obj": obj,
         "f": obj,
@@ -177,6 +179,8 @@ def batch_obj_grad(X, Y, regr, kernel, thetas, noise=0.0, with_grad=True, noise_
         False), and the feasibility mask ``(J,)``. When ``noise_grad`` is set, a fourth
         element ``dnoise`` ``(J,)`` (``0`` where infeasible) is appended.
     """
+    if noise_grad and not with_grad:
+        raise ValueError("noise_grad requires with_grad")
     thetas = np.atleast_2d(np.asarray(thetas, dtype=float))
     J, p = thetas.shape
     n = X.shape[0]
@@ -195,7 +199,7 @@ def batch_obj_grad(X, Y, regr, kernel, thetas, noise=0.0, with_grad=True, noise_
         feas = np.zeros(J, dtype=bool)
         return (obj, grad, feas, dnoise) if noise_grad else (obj, grad, feas)
 
-    base = (10 + n) * 2.220446049250313e-16
+    base = (10 + n) * _EPS
     # noise may be a scalar (same nugget for all) or a per-candidate (J,) array; reshape so
     # it broadcasts onto the (J, n, n) stack as a diagonal add.
     diag = (base + np.asarray(noise, dtype=float)).reshape(-1, 1, 1)
@@ -258,7 +262,7 @@ def batch_obj_grad(X, Y, regr, kernel, thetas, noise=0.0, with_grad=True, noise_
         # (n*n, d), the kernel-matrix layout -- reuse the caller's precomputed differences when
         # given (one array shared across the whole theta search) instead of rebuilding them here.
         if D is None:
-            D = np.repeat(X, n, axis=0) - np.tile(X, (n, 1))
+            D = pairwise_diffs(X, X)
         # Loop over the (small) population rather than pre-stacking a single (m, n, n, p)
         # derivative tensor -- that tensor grows as m*n^2*p (tens of MB by n=120) and the
         # allocation/cache traffic, not the FLOPs, was the cost. Each member touches only

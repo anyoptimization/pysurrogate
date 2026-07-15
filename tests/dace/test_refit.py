@@ -33,6 +33,38 @@ def test_refit_before_fit_raises():
         _model().refit(X, _fun(X))
 
 
+def test_predict_before_fit_raises():
+    # predict() before any fit() dereferenced self.model (None) and raised a cryptic TypeError;
+    # it must now fail with the same clear "requires a prior fit" guard as refit/calibrate.
+    rng = np.random.default_rng(0)
+    X = rng.random((5, 1))
+    with pytest.raises(Exception, match="requires a prior fit"):
+        _model().predict(X)
+
+
+def test_refit_warm_starts_learned_nugget():
+    # a learned-nugget model must warm-start the nugget from the previous optimum on refit (like
+    # calibrate). refit(optimize=False) re-commits at that learned nugget, NOT the constructor
+    # start -- previously refit discarded the learned nugget and reset it.
+    rng = np.random.default_rng(1)
+    X0 = rng.random((15, 1))
+    model = Dace(
+        regr=ConstantRegression(),
+        corr=Gaussian(),
+        theta=1.0,
+        theta_bounds=(1e-5, 100.0),
+        noise=0.5,  # constructor nugget START
+        noise_bounds=(1e-6, 1.0),
+    )
+    model.fit(X0, _fun(X0))
+    learned = model.model["noise"]
+    assert learned != 0.5  # the search moved the nugget off the constructor start
+
+    X_new = rng.random((5, 1))
+    model.refit(X_new, _fun(X_new), optimize=False)
+    assert model.model["noise"] == learned  # preserved, not reset to the 0.5 constructor start
+
+
 def test_refit_appends_and_matches_cold_fit_on_combined_data():
     # refit takes only the new points; an MLE refit (validate=False) with the same
     # optimizer must equal a cold fit on the full combined set -- warm starting changes

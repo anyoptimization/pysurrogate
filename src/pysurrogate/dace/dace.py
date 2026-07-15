@@ -2,11 +2,13 @@
 
 import numpy as np
 
+from pysurrogate.core.kernel import pairwise_diffs
 from pysurrogate.core.optimizer import Callback
 from pysurrogate.core.optimizer import Optimizer as GenericOptimizer
 from pysurrogate.core.partitioning import Partitioning, default_partitioning
 from pysurrogate.core.prediction import Prediction
 from pysurrogate.core.sampling import LHS, Sampling
+from pysurrogate.core.transformation import standardize
 from pysurrogate.dace.corr import Gaussian
 from pysurrogate.dace.fit import DaceFitError, fit
 from pysurrogate.dace.problem import DaceProblem
@@ -118,7 +120,7 @@ class Dace:
 
         # the hyperparameter can be defined (coerce a list like the bounds below, so
         # a vector theta reaches the kernel as an array and not a Python list)
-        self.theta = np.array(theta) if type(theta) is list else theta
+        self.theta = np.asarray(theta) if isinstance(theta, (list, tuple)) else theta
 
         # lower and upper bound that shape the search box (theta_bounds=None -> unbounded above,
         # NOT frozen; freezing is optimizer=None). Internal names stay tl/tu (the optimizers read them).
@@ -126,8 +128,8 @@ class Dace:
             self.tl, self.tu = None, None
         else:
             lo, hi = theta_bounds
-            self.tl = np.array(lo) if type(lo) is list else lo
-            self.tu = np.array(hi) if type(hi) is list else hi
+            self.tl = np.asarray(lo) if isinstance(lo, (list, tuple)) else lo
+            self.tu = np.asarray(hi) if isinstance(hi, (list, tuple)) else hi
 
         # strategy that optimizes theta within the bounds. Unset -> a generic screen-and-polish
         # (Restart(LBFGS(), Sampling(16, LHS()), screen=4)) that reaches a better surrogate than
@@ -167,9 +169,11 @@ class Dace:
     def fit(self, X, Y, optimize=True):
         """Fit the model: standardize, select theta (search or freeze), and solve the GLS system.
 
-        Theta is selected by **maximum likelihood** over all rows. Held-out theta selection lives on
-        :meth:`refit` (``validate=True``), which holds out the newly appended points -- ``fit`` itself
-        has no held-out mask.
+        Theta is selected by **maximum likelihood** over all rows by default. A held-out
+        :class:`~pysurrogate.dace.selection.Selection` (e.g.
+        :class:`~pysurrogate.dace.selection.HeldOut`) instead carves an internal train/validation
+        split and selects on validation error; :meth:`refit` (``validate=True``) is the other
+        held-out path, holding out the newly appended points.
 
         Args:
             X: Training inputs, shape ``(n, d)``.
@@ -228,14 +232,13 @@ class Dace:
     def _standardize(self, X, Y):
         """Standardize inputs and targets to zero mean / unit variance (``ddof=1``); return ``(nX, nY, stats)``.
 
-        A constant column/output has zero std, which would divide to NaN -- guard it to 1 so the
-        constant maps to all-zeros after centering and the fit degrades to a constant predictor.
+        A constant column/output has zero std, which would divide to NaN -- the shared
+        :func:`~pysurrogate.core.transformation.standardize` guards it to 1 so the constant maps to
+        all-zeros after centering and the fit degrades to a constant predictor.
         """
-        mX, sX = np.mean(X, axis=0), np.std(X, axis=0, ddof=1)
-        mY, sY = np.mean(Y, axis=0), np.std(Y, axis=0, ddof=1)
-        sX = np.where(sX == 0.0, 1.0, sX)
-        sY = np.where(sY == 0.0, 1.0, sY)
-        return (X - mX) / sX, (Y - mY) / sY, {"mX": mX, "sX": sX, "mY": mY, "sY": sY}
+        nX, mX, sX = standardize(X)
+        nY, mY, sY = standardize(Y)
+        return nX, nY, {"mX": mX, "sX": sX, "mY": mY, "sY": sY}
 
     def _search_config(self, optimize):
         """Resolve and validate ``(effective_optimizer, optimize_theta)`` for this fit.
@@ -394,16 +397,21 @@ class Dace:
         X = np.vstack([self.model["X"], X])
         Y = np.vstack([self.model["Y"], Y])
 
-        # reuse the previously optimized theta -- the warm start (search) or frozen value (no search)
+        # reuse the previously optimized theta AND nugget -- the warm start (search) or frozen value
+        # (no search). Warm-starting the nugget from the previous optimum mirrors calibrate(); without
+        # it a learned-nugget refit would silently reset the nugget to the constructor start.
         self.theta = self.model["theta"]
+        self.noise = float(self.model["noise"])
         self.scale = 1.0
 
         nX, nY, stats = self._standardize(X, Y)
         effective_optimizer, optimize_theta = self._search_config(optimize)
         if optimize_theta and validate:
-            # select theta by how well the OLD rows predict the appended NEW rows (held-out selection)
+            # select theta by how well the OLD rows predict the appended NEW rows (held-out selection);
+            # forward the Selection's early-stopping patience (as fit() does), guarding for no selection.
+            patience = self._selection.patience if self._selection is not None else None
             theta, noise, self.optimization = self._optimize_generic(
-                nX[:n_old], nY[:n_old], effective_optimizer, val=(nX[n_old:], nY[n_old:])
+                nX[:n_old], nY[:n_old], effective_optimizer, val=(nX[n_old:], nY[n_old:]), patience=patience
             )
         elif optimize_theta:
             theta, noise, self.optimization = self._optimize_generic(nX, nY, effective_optimizer)
@@ -434,6 +442,9 @@ class Dace:
             ``(m, d)``) is also returned -- it shares the variance and mean-gradient terms,
             so the extra cost is one triangular solve per point.
         """
+        if self.model is None:
+            raise Exception("predict() requires a prior fit(); call fit() first.")
+
         # `mse` is the DACE-literature alias of `var` (mirrors Prediction.mse/var); honor it.
         if mse is not None:
             var = mse
@@ -451,7 +462,7 @@ class Dace:
         # not rebuild it. _F is the regression design, _R the kernel matrix reshaped (m, n).
         m, d = _nX.shape
         n = nX.shape[0]
-        _D = np.repeat(_nX, n, axis=0) - np.tile(nX, (m, 1))
+        _D = pairwise_diffs(_nX, nX)
         _F = regr(_nX)
         _R = corr(_D, theta).reshape(m, n)
 
@@ -542,8 +553,7 @@ class Dace:
                 cross-validation. Pass a :class:`~pysurrogate.core.partitioning.Partitioning`
                 (e.g. ``RandomPartitioning`` for repeated hold-out, a higher ``k_folds`` for
                 LOO-like behavior), or a **boolean mask** over the training rows -- a single split
-                whose ``True`` rows are the held-out validation block and the rest are re-fit
-                (mirrors ``fit``'s ``validation`` mask).
+                whose ``True`` rows are the held-out validation block and the rest are re-fit.
 
         Returns:
             The fitted scale ``s`` (also stored on ``self.scale``); ``> 1`` means the model was
