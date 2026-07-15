@@ -1,5 +1,7 @@
 """pysurrogate — a unified surrogate-modeling toolkit (sampling, fitting, selection)."""
 
+import logging as _logging
+
 from pysurrogate.core import (
     LHS,
     Callback,
@@ -85,6 +87,11 @@ from pysurrogate.selection import (
     score,
     study,
 )
+from pysurrogate.util.logging import disable_logging, enable_logging
+
+# Library logging convention: attach a NullHandler so pysurrogate never emits to a
+# root logger the application didn't configure. Call enable_logging() to turn output on.
+_logging.getLogger("pysurrogate").addHandler(_logging.NullHandler())
 
 __version__ = "0.1.0"
 
@@ -189,5 +196,8 @@ __all__ = [
     "as_named",
     # exploratory landscape analysis
     "Landscape",
+    # logging control
+    "enable_logging",
+    "disable_logging",
     "__version__",
 ]

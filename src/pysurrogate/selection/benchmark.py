@@ -1,6 +1,7 @@
 """Benchmark surrogate models and select the best: cross-validation, function sweeps, selection."""
 
 import copy
+import logging
 
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
@@ -17,7 +18,10 @@ from pysurrogate.selection.metrics import (
     get_metric,
     metric_sort_key,
 )
+from pysurrogate.util.logging import get_logger
 from pysurrogate.util.misc import at_least2d
+
+log = get_logger("selection")
 
 # ---------------------------------------------------------------------------------------------
 # FunctionBenchmark -- sample a known function, fit models, emit a tidy predictions DataFrame
@@ -363,7 +367,21 @@ class AutoModel(Model):
             raise RuntimeError("No candidate model could be fitted successfully.")
 
         self.ranking = ranking
+
+        def _mean(entry):
+            return entry["performance"][self.sorted_by]["mean"]
+
         self.best = ranking[0]
+        log.info(
+            "AutoModel: selected %r by %s=%.6g out of %d candidate(s)",
+            self.best["label"],
+            self.sorted_by,
+            _mean(self.best),
+            len(ranking),
+        )
+        if log.isEnabledFor(logging.DEBUG):
+            for rank, entry in enumerate(ranking):
+                log.debug("AutoModel ranking #%d: %r %s=%.6g", rank, entry["label"], self.sorted_by, _mean(entry))
 
         if self.refit_best:
             # refit the winning prototype on the FULL data set (the common case).

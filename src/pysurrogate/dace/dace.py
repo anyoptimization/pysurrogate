@@ -16,6 +16,9 @@ from pysurrogate.dace.regr import ConstantRegression
 from pysurrogate.dace.selection import _UNSET as _SELECTION_UNSET
 from pysurrogate.dace.selection import ValidationSelection
 from pysurrogate.optimizer import LBFGS, Restart
+from pysurrogate.util.logging import get_logger
+
+log = get_logger("dace")
 
 # sentinel for the `optimizer` argument: distinguishes "caller said nothing -> use the
 # default optimizer" from an explicit ``optimizer=None``, which means "do not search -- freeze
@@ -325,8 +328,18 @@ class Dace:
         # no PD candidate at the search noise -> fall back to the start theta; the committing
         # fit() then either succeeds there or raises (no hidden repair climb). Fix a persistent
         # failure by setting noise / noise_bounds, not silently.
+        if res.x is None:
+            log.debug("dace theta search: no PD candidate found, falling back to the start theta")
         x_best = res.x if res.x is not None else x0
         theta, noise = problem.decode(x_best)
+        log.info(
+            "dace theta search: %d evals, objective %.6g, theta=%s%s (%s)",
+            res.n_evals,
+            res.f,
+            np.array2string(np.atleast_1d(theta), precision=4, threshold=8),
+            f", nugget={noise:.3g}" if problem.learn_noise else "",
+            res.message,
+        )
         record = {
             "theta": theta,
             "noise": noise,
