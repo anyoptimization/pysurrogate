@@ -150,17 +150,20 @@ def test_rejects_multi_output():
 
 
 @pytest.mark.slow
-def test_beats_mle_kriging_calibration_on_noisy_data():
-    # THE value proposition: on noisy data the Bayesian model-average reports honest uncertainty,
-    # while MLE-Kriging's single-theta variance is overconfident. Asserted on the aggregate NLPD
-    # across seeds (robust), not per-seed (which MLE occasionally wins when it happens to be calibrated).
+def test_calibrates_better_than_interpolating_kriging_on_noisy_data():
+    # Scope: on a SMOOTH, low-effective-dimensional noisy problem, the Bayesian model-average reports
+    # honest uncertainty, whereas an INTERPOLATING MLE-Kriging (ARD, no learned nugget) forced through
+    # the noise is overconfident. This is the specific failure mode FBGP avoids -- not a universal win:
+    # against a nugget-learning Kriging, or on rugged multimodal landscapes, FBGP is only comparable
+    # (and sometimes worse). Asserted on the aggregate NLPD across seeds (robust), not per-seed.
     bayes, krig = [], []
     for s in range(5):
         Xtr, ytr, Xte, yte = _toy(seed=s, n=40, d=4)
         bp = FullyBayesianGP(random_state=s).fit(Xtr, ytr).predict(Xte, var=True)
+        # deliberately a no-nugget interpolation of noisy data -- the overconfident baseline.
         kp = Kriging(ARD=True).fit(Xtr, ytr).predict(Xte, var=True)
         bayes.append(_nlpd(bp.y, bp.var, yte))
         krig.append(_nlpd(kp.y, kp.var, yte))
-    # a wide margin (empirically ~0.2 vs ~0.9); the loose bound guards against float/seed jitter
-    # while still failing loudly if the marginalization ever stops calibrating.
+    # empirically ~0.19 vs ~0.99 against this no-nugget baseline; the loose bound guards against
+    # float/seed jitter while still failing loudly if the marginalization ever stops calibrating.
     assert np.mean(bayes) < 0.6 * np.mean(krig)
