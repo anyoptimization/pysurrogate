@@ -32,21 +32,38 @@ class _GPPosterior:
         self.p = self.problem.p  # number of length-scale coordinates (the nugget is coordinate p)
         self.prior = prior
 
-    def potential(self, x):
-        """Negative log-posterior ``U(x)`` at the ``log10`` hyperparameter vector ``x`` (``+inf`` if infeasible)."""
-        ev = self.problem(x[None])
+    def _eval(self, x):
+        """Evaluate the DACE objective/grad at ``x``, or ``None`` if the point is infeasible.
+
+        HMC explores far-out length-scales the *bounded* Kriging search never reaches, and there the
+        underlying solve can not only report ``feasible=False`` but actually *raise* (``np.linalg.cond``
+        runs an SVD that fails to converge on a non-finite matrix). Both are the same thing to the
+        sampler -- a point to reject -- so an exception is caught and folded into the infeasible path.
+        """
+        try:
+            ev = self.problem(x[None])
+        except Exception:
+            return None
         obj = float(ev.f[0])
         if not ev.feasible[0] or obj <= 0.0 or not np.isfinite(obj):
+            return None
+        return ev, obj
+
+    def potential(self, x):
+        """Negative log-posterior ``U(x)`` at the ``log10`` hyperparameter vector ``x`` (``+inf`` if infeasible)."""
+        res = self._eval(x)
+        if res is None:
             return np.inf
+        _, obj = res
         pen = 0.0 if self.prior is None else float(self.prior.penalty(x[None, : self.p])[0])
         return 0.5 * self.n * np.log(obj) + pen
 
     def grad(self, x):
         """Gradient ``dU/dx`` (zeros on an infeasible point so the leapfrog just coasts through)."""
-        ev = self.problem(x[None])
-        obj = float(ev.f[0])
-        if not ev.feasible[0] or obj <= 0.0 or not np.isfinite(obj):
+        res = self._eval(x)
+        if res is None:
             return np.zeros_like(x)
+        ev, obj = res
         out = (0.5 * self.n / obj) * ev.grad[0]  # d/dx [ (n/2) log(obj) ] = (n/2)/obj * d(obj)/dx
         if self.prior is not None:
             out[: self.p] = out[: self.p] + self.prior.grad(x[None, : self.p])[0]
