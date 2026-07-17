@@ -113,6 +113,29 @@ def test_guard_maps_a_bad_objective_to_infinite_potential_and_zero_gradient(obj,
     np.testing.assert_array_equal(post.grad(x), np.zeros_like(x))
 
 
+class _RaisingProblem:
+    """A DaceProblem stand-in whose solve RAISES -- HMC reaches length-scales where the SVD fails."""
+
+    p = 2
+
+    def __call__(self, X):
+        # np.linalg.cond runs an SVD that can fail to converge on a non-finite correlation matrix at
+        # the extreme length-scales HMC explores; the solve raises rather than reporting infeasible.
+        raise np.linalg.LinAlgError("SVD did not converge")
+
+
+def test_guard_treats_a_raising_solve_as_infeasible_instead_of_crashing():
+    # regression: HMC explores far-out hyperparameters the bounded Kriging search never reaches, where
+    # the DACE solve can *raise* (not just report feasible=False). The potential/grad must fold that
+    # into the reject path (U=+inf, grad=0) so the sampler coasts through instead of crashing mid-chain.
+    post = _GPPosterior.__new__(_GPPosterior)
+    post.problem = _RaisingProblem()
+    post.n, post.p, post.prior = 10, 2, None
+    x = np.array([0.0, 0.0, -3.0])
+    assert not np.isfinite(post.potential(x))
+    np.testing.assert_array_equal(post.grad(x), np.zeros_like(x))
+
+
 # ------------------------------------------------------------------------------------- the backend
 
 
